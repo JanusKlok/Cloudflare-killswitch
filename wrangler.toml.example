@@ -1,0 +1,75 @@
+name = "cloudflare-killswitch"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
+preview_urls = false
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+# ---------------------------------------------------------------------------
+# KV — stores kill-switch state (required)
+# Replace the id with your real KV namespace ID from the Cloudflare dashboard:
+#   wrangler kv namespace create KILL_SWITCH_STATE
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "KILL_SWITCH_STATE"
+id = "REPLACE_ME_WITH_YOUR_KV_NAMESPACE_ID"
+
+# ---------------------------------------------------------------------------
+# Vars (not secret — safe to commit)
+# ---------------------------------------------------------------------------
+[vars]
+# Your Cloudflare account ID
+# https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
+CLOUDFLARE_ACCOUNT_ID = "REPLACE_ME_WITH_YOUR_ACCOUNT_ID"
+
+# Your zone ID — required when scope = 'zone' in config.ts (free tier default)
+# Leave as placeholder if using scope = 'account'
+# https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
+CLOUDFLARE_ZONE_ID = "REPLACE_ME_WITH_YOUR_ZONE_ID"
+
+# The name of this Worker script — used to exclude itself when blocking.workers = 'all'.
+# Must match the `name` field at the top of this file.
+WORKER_SELF_NAME = "cloudflare-killswitch"
+
+# ---------------------------------------------------------------------------
+# Secrets — set with `wrangler secret put <NAME>` (never commit these values)
+# ---------------------------------------------------------------------------
+# wrangler secret put CLOUDFLARE_API_TOKEN
+#   Needs permissions: Zone.WAF (Edit), Account.Account WAF (Edit if using scope='account')
+#
+# wrangler secret put RECOVERY_SECRET
+#   Any strong random string; used as the Bearer token for POST /restore
+
+# ---------------------------------------------------------------------------
+# Email alerts — OPTIONAL
+# Uncomment the block below AND set EMAIL_FROM / EMAIL_TO only if you want
+# email notifications.  Requires Cloudflare Email Routing to be enabled on
+# your account with a verified destination address.
+# ---------------------------------------------------------------------------
+# [[send_email]]
+# name = "SEND_EMAIL"
+# destination_address = "REPLACE_ME_WITH_DESTINATION_EMAIL"
+
+# [vars] additions for email (add under the existing [vars] section above):
+# EMAIL_FROM = "killswitch@yourdomain.com"   # must be a verified sender in Email Routing
+# EMAIL_TO   = "you@example.com"             # must match destination_address above
+
+# ---------------------------------------------------------------------------
+# R2 bindings — OPTIONAL, only needed if purgeConfig.r2 is non-empty in config.ts
+# Uncomment and duplicate this block for each bucket you want to purge.
+# The binding name MUST match purgeConfig.r2[].bindingName in config.ts exactly.
+# ---------------------------------------------------------------------------
+# [[r2_buckets]]
+# binding     = "REPLACE_ME_R2_BINDING"   # e.g. "MY_UPLOADS_BUCKET"
+# bucket_name = "your-actual-bucket-name"
+
+# ---------------------------------------------------------------------------
+# D1 bindings — OPTIONAL, only needed if purgeConfig.d1 is non-empty in config.ts
+# Uncomment and duplicate this block for each database you want to purge.
+# The binding name MUST match purgeConfig.d1[].bindingName in config.ts exactly.
+# ---------------------------------------------------------------------------
+# [[d1_databases]]
+# binding     = "REPLACE_ME_D1_BINDING"   # e.g. "MY_APP_DB"
+# database_id = "REPLACE_ME_WITH_DATABASE_ID"
