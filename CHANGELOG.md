@@ -12,6 +12,9 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Changed
 
+- Dev dependencies bumped to the newest versions clearing the 7-day quarantine: wrangler 4.105.0, @cloudflare/vitest-pool-workers 0.16.20, @cloudflare/workers-types 4.20260626.1, vitest 4.1.9; CI uses actions/checkout@v7.
+- The vitest pool now pins an explicit `compatibilityDate`. Without it the pool defaults to "today", which can exceed the newest date the installed workerd binary supports, failing every test with `ERR_RUNTIME_FAILURE`.
+
 - Purges are now scoped to the breaching service: R2 purge targets only run on an R2 `purgeAt` breach and D1 targets only on a D1 breach. Previously a `purgeAt` breach on *any* metric (e.g. a Workers request spike) purged every configured R2 bucket and D1 table.
 - `POST /restore` and the monthly auto-reset now only clear the parts of the kill that were successfully undone. On partial failure the state stays `killed` holding just the failed remnants (retryable via another `/restore`), and the webhook returns 502 with per-item errors instead of a false `restored: true`.
 - The `/restore` rate limit is now keyed per client IP (`CF-Connecting-IP`) instead of globally, so an attacker spamming the endpoint can no longer lock the operator out of recovery. Rate-limit KV keys now expire automatically.

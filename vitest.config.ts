@@ -8,6 +8,10 @@ export default defineConfig({
       // Top-level miniflare options override/extend the main worker from wrangler.toml.
       // Secrets and optional vars are provided here so tests work without a real account.
       miniflare: {
+        // Pin the runner's compatibility date: without it the pool defaults to
+        // "today", which can exceed the newest date the installed workerd
+        // binary supports (they lag a few days behind the calendar).
+        compatibilityDate: '2026-06-01',
         bindings: {
           CLOUDFLARE_API_TOKEN: 'test-api-token',
           CLOUDFLARE_ACCOUNT_ID: 'test-account-id',
