@@ -4,8 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # Match the supply-chain quarantine in .npmrc — never propose updates
-    # to versions published less than 7 days ago.
+    # Match the supply-chain quarantine in .npmrc (minimum-release-age=10080):
+    # without this, Dependabot proposes versions younger than 7 days, pnpm
+    # refuses to resolve them, and the updater job fails.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - dependencies

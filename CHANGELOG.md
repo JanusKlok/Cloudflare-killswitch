@@ -19,6 +19,8 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Fixed
 
+- Dependabot now uses a 7-day `cooldown`, matching the `.npmrc` `minimum-release-age` quarantine. Previously it proposed versions younger than 7 days, which pnpm refused to resolve, failing the updater job.
+
 - Account-wide storage metrics for KV, R2, and D1 now group by namespace/bucket/database and sum the per-entity maxima. Previously the ungrouped `max` reported only the single largest entity, undercounting accounts with more than one namespace/bucket/database.
 - GraphQL `date_geq`/`date_leq` filters (KV storage, D1 analytics and storage) are now passed calendar dates (`YYYY-MM-DD`) instead of full timestamps, which the Date filter type rejects.
 
