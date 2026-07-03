@@ -102,8 +102,10 @@ export interface BlockingConfig {
 
 export interface AppConfig {
   /** 'zone' = protect a single zone (free-tier friendly).
-   *  'account' = protect all zones (requires paid Cloudflare plan). */
-  scope: 'zone' | 'account';
+   *  'account' = protect all zones (requires an Enterprise plan).
+   *  'none' = deploy no WAF rule — rely solely on blocking.workers/pages.
+   *           For accounts with no zone (workers.dev / pages.dev only). */
+  scope: 'zone' | 'account' | 'none';
   autoResetOnFirstOfMonth: boolean;
   enableRecoveryWebhook: boolean;
   limits: {

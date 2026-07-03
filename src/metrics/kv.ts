@@ -1,6 +1,6 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { utcDayStart, utcMonthStart, utcNow } from '../graphql/queries.js';
+import { utcDayStart, utcMonthStartDate, utcNow, utcToday } from '../graphql/queries.js';
 import { evaluateSample } from './evaluate.js';
 
 interface KvOpsData {
@@ -17,7 +17,10 @@ interface KvOpsData {
 interface KvStorageData {
   viewer: {
     accounts: {
-      kvStorageAdaptiveGroups: { max: { byteCount: number } }[];
+      kvStorageAdaptiveGroups: {
+        max: { byteCount: number };
+        dimensions: { namespaceId: string };
+      }[];
     }[];
   };
 }
@@ -54,11 +57,12 @@ export const kvModule: ServiceModule = {
                 filter: { date_geq: $start, date_leq: $end }
               ) {
                 max { byteCount }
+                dimensions { namespaceId }
               }
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStart(), end: utcNow() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStartDate(), end: utcToday() },
       ),
     ]);
 
@@ -71,8 +75,16 @@ export const kvModule: ServiceModule = {
       else if (t === 'write' || t === 'delete' || t === 'list') writes += row.sum.requests;
     }
 
+    // The 1 GB free-tier limit is account-wide, so sum the per-namespace maxes —
+    // an ungrouped max would only report the single largest namespace.
     const storageRows = storageData.viewer.accounts[0]?.kvStorageAdaptiveGroups ?? [];
-    const storageBytes = storageRows.reduce((max, r) => Math.max(max, r.max.byteCount), 0);
+    const perNamespaceMax = new Map<string, number>();
+    for (const r of storageRows) {
+      const id = r.dimensions.namespaceId;
+      perNamespaceMax.set(id, Math.max(perNamespaceMax.get(id) ?? 0, r.max.byteCount));
+    }
+    let storageBytes = 0;
+    for (const v of perNamespaceMax.values()) storageBytes += v;
 
     return [
       { metric: 'reads', value: reads, window: 'day' },

@@ -35,7 +35,10 @@ interface R2OpsData {
 interface R2StorageData {
   viewer: {
     accounts: {
-      r2StorageAdaptiveGroups: { max: { payloadSize: number } }[];
+      r2StorageAdaptiveGroups: {
+        max: { payloadSize: number };
+        dimensions: { bucketName: string };
+      }[];
     }[];
   };
 }
@@ -72,6 +75,7 @@ export const r2Module: ServiceModule = {
                 filter: { datetime_geq: $start, datetime_leq: $end }
               ) {
                 max { payloadSize }
+                dimensions { bucketName }
               }
             }
           }
@@ -89,8 +93,16 @@ export const r2Module: ServiceModule = {
       else if (CLASS_B_OPS.has(t)) classBOps += row.sum.requests;
     }
 
+    // The 10 GB free-tier limit is account-wide, so sum the per-bucket maxes —
+    // an ungrouped max would only report the single largest bucket.
     const storageRows = storageData.viewer.accounts[0]?.r2StorageAdaptiveGroups ?? [];
-    const storageBytes = storageRows.reduce((max, r) => Math.max(max, r.max.payloadSize), 0);
+    const perBucketMax = new Map<string, number>();
+    for (const r of storageRows) {
+      const name = r.dimensions.bucketName;
+      perBucketMax.set(name, Math.max(perBucketMax.get(name) ?? 0, r.max.payloadSize));
+    }
+    let storageBytes = 0;
+    for (const v of perBucketMax.values()) storageBytes += v;
 
     return [
       { metric: 'storageBytes', value: storageBytes, window: 'month' },

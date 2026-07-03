@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { handleFetch } from '../src/recovery.js';
-import { writeKilled } from '../src/state.js';
+import { readState, writeActive, writeKilled } from '../src/state.js';
 import type { AppConfig } from '../src/types.js';
 import { CONFIG } from '../src/config.js';
 
@@ -62,7 +62,7 @@ describe('handleFetch', () => {
 
   it('returns 429 after the rate limit is exceeded', async () => {
     // Reset the rolling window — prior tests in this file may have used some attempts.
-    await env.KILL_SWITCH_STATE.delete('restore-attempts');
+    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
 
     // 10 successful attempts fill the window — all return 200 since the
     // secret is correct.  The 11th must be rate-limited.
@@ -75,9 +75,66 @@ describe('handleFetch', () => {
     expect(blocked.headers.get('Retry-After')).toBe('60');
   });
 
+  it('returns 500 when RECOVERY_SECRET is not configured — "Bearer undefined" must not authenticate', async () => {
+    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
+    const envNoSecret = { ...env, RECOVERY_SECRET: undefined as unknown as string };
+    const res = await handleFetch(makeRequest('POST', '/restore', 'undefined'), envNoSecret, cfg);
+    expect(res.status).toBe(500);
+  });
+
   it('rejects requests where Authorization header has wrong length', async () => {
-    await env.KILL_SWITCH_STATE.delete('restore-attempts');
+    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
     const res = await handleFetch(makeRequest('POST', '/restore', SECRET + 'x'), env, cfg);
     expect(res.status).toBe(403);
+  });
+
+  it('rate-limits per client IP — one IP cannot lock out another', async () => {
+    await env.KILL_SWITCH_STATE.delete('restore-attempts:1.2.3.4');
+    await env.KILL_SWITCH_STATE.delete('restore-attempts:5.6.7.8');
+
+    const fromIp = (ip: string) =>
+      new Request('http://worker/restore', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${SECRET}`, 'CF-Connecting-IP': ip },
+      });
+
+    for (let i = 0; i < 10; i++) {
+      await handleFetch(fromIp('1.2.3.4'), env, cfg);
+    }
+    expect((await handleFetch(fromIp('1.2.3.4'), env, cfg)).status).toBe(429);
+    expect((await handleFetch(fromIp('5.6.7.8'), env, cfg)).status).toBe(200);
+  });
+
+  it('returns 502 and keeps a killed remnant when part of the restore fails', async () => {
+    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
+    await writeKilled(env, {
+      reason: 'test',
+      wafRuleId: 'r-1',
+      wafRulesetId: 'rs-1',
+      disabledWorkerScripts: ['stuck-worker'],
+    });
+
+    // WAF rule deletion succeeds; the workers subdomain re-enable fails.
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('/subdomain')) {
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 9999, message: 'boom' }] }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
+    });
+
+    const res = await handleFetch(makeRequest('POST', '/restore', SECRET), env, cfg);
+    expect(res.status).toBe(502);
+    const body = await res.json() as { restored: boolean; errors: string[] };
+    expect(body.restored).toBe(false);
+    expect(body.errors.join(' ')).toContain('stuck-worker');
+
+    const state = await readState(env);
+    expect(state.status).toBe('killed');
+    expect(state.disabledWorkerScripts).toEqual(['stuck-worker']);
+    expect(state.wafRuleId).toBeUndefined(); // WAF removal succeeded — cleared
+
+    // Reset for any later tests.
+    await writeActive(env);
   });
 });

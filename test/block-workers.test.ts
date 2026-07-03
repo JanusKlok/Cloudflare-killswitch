@@ -98,7 +98,8 @@ describe('enableWorkers', () => {
 
   it('calls POST /subdomain with enabled:true for each script', async () => {
     vi.mocked(fetch).mockImplementation(okResp());
-    await enableWorkers(env, ['app-x', 'app-y']);
+    const failed = await enableWorkers(env, ['app-x', 'app-y']);
+    expect(failed).toEqual([]);
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
 
     for (const [url, init] of vi.mocked(fetch).mock.calls as [string, RequestInit][]) {
@@ -107,10 +108,10 @@ describe('enableWorkers', () => {
     }
   });
 
-  it('does not throw when a re-enable call fails', async () => {
+  it('returns the names of scripts that failed to re-enable instead of throwing', async () => {
     vi.mocked(fetch).mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify({ success: false, errors: [{ code: 404, message: 'not found' }] }), { status: 404 })),
     );
-    await expect(enableWorkers(env, ['gone-script'])).resolves.toBeUndefined();
+    await expect(enableWorkers(env, ['gone-script'])).resolves.toEqual(['gone-script']);
   });
 });

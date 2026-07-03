@@ -78,7 +78,7 @@ describe('deployBlockRule', () => {
     expect(body.expression).toContain('/restore');
   });
 
-  it('uses (true) expression when webhook disabled', async () => {
+  it('uses a field-based match-all expression when webhook disabled', async () => {
     const cfg: AppConfig = { ...testCfg, enableRecoveryWebhook: false };
     const mockFetch = vi.mocked(fetch);
     mockFetch.mockImplementation(() =>
@@ -87,7 +87,8 @@ describe('deployBlockRule', () => {
     await deployBlockRule(env, cfg);
 
     const body = JSON.parse(mockFetch.mock.calls[1]?.[1]?.body as string) as { expression: string };
-    expect(body.expression).toBe('(true)');
+    // The rules language rejects bare boolean literals like (true).
+    expect(body.expression).toBe('(ip.src ne 0.0.0.0)');
   });
 });
 

@@ -24,8 +24,8 @@ id = "REPLACE_ME_WITH_YOUR_KV_NAMESPACE_ID"
 # https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
 CLOUDFLARE_ACCOUNT_ID = "REPLACE_ME_WITH_YOUR_ACCOUNT_ID"
 
-# Your zone ID — required when scope = 'zone' in config.ts (free tier default)
-# Leave as placeholder if using scope = 'account'
+# Your zone ID — required when scope = 'zone' in config.ts
+# Leave as placeholder if using scope = 'account' or scope = 'none'
 # https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
 CLOUDFLARE_ZONE_ID = "REPLACE_ME_WITH_YOUR_ZONE_ID"
 
@@ -37,7 +37,11 @@ WORKER_SELF_NAME = "cloudflare-killswitch"
 # Secrets — set with `wrangler secret put <NAME>` (never commit these values)
 # ---------------------------------------------------------------------------
 # wrangler secret put CLOUDFLARE_API_TOKEN
-#   Needs permissions: Zone.WAF (Edit), Account.Account WAF (Edit if using scope='account')
+#   Needs permissions depending on your config (run `pnpm run validate` for the exact list):
+#     scope='zone'    -> Zone.WAF (Edit)
+#     scope='account' -> Account.Account WAF (Edit)
+#     blocking.workers set -> Account.Workers Scripts (Edit)
+#     blocking.pages set   -> Account.Cloudflare Pages (Edit)
 #
 # wrangler secret put RECOVERY_SECRET
 #   Any strong random string; used as the Bearer token for POST /restore

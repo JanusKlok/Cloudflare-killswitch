@@ -54,7 +54,9 @@ function blockExpression(cfg: AppConfig): string {
   if (cfg.enableRecoveryWebhook) {
     return 'not (http.request.method eq "POST" and http.request.uri.path eq "/restore")';
   }
-  return '(true)';
+  // The rules language has no bare boolean literal; this field comparison is
+  // the conventional match-all expression.
+  return '(ip.src ne 0.0.0.0)';
 }
 
 export async function deployBlockRule(

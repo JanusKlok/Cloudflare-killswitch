@@ -8,16 +8,20 @@ import type { AppConfig } from './types.js';
 // ---------------------------------------------------------------------------
 export const CONFIG: AppConfig = {
   // 'zone'    — blocks traffic on the single zone configured via CLOUDFLARE_ZONE_ID.
-  //             Works on the Free plan. Recommended for most users.
+  //             Works on the Free plan. Recommended if you have a domain on Cloudflare.
   // 'account' — blocks traffic account-wide via the Account WAF.
-  //             REQUIRES a paid Cloudflare plan.
-  scope: 'zone',
+  //             REQUIRES an Enterprise plan (account-level custom rulesets
+  //             are Enterprise-only — not available on Free/Pro/Business).
+  // 'none'    — deploys no WAF rule at all. For accounts with no domain/zone
+  //             (workers.dev / pages.dev only) — set blocking.workers and
+  //             blocking.pages below, or the kill switch will do nothing.
+  scope: 'none',
 
   // Automatically restore on the 1st of each calendar month (UTC).
   autoResetOnFirstOfMonth: true,
 
   // Expose POST /restore so you can re-arm without touching the dashboard.
-  enableRecoveryWebhook: true,
+  enableRecoveryWebhook: false,
 
   limits: {
     workers: {
@@ -67,7 +71,7 @@ export const CONFIG: AppConfig = {
     // string[]  → explicit list of script names to disable.
     // []        → do not touch any Workers scripts (default, safest).
     // -----------------------------------------------------------------------
-    workers: [] as string[],
+    workers: 'all',
 
     // -----------------------------------------------------------------------
     // pages — Pages projects to block on kill.
@@ -78,12 +82,13 @@ export const CONFIG: AppConfig = {
     // string[] → explicit list of project names.
     // []       → do not touch any Pages projects (default, safest).
     // -----------------------------------------------------------------------
-    pages: [] as string[],
+    pages: 'all',
   },
 
   purgeConfig: {
     // -----------------------------------------------------------------------
-    // R2 purge — OPTIONAL.  Only runs when a storage metric exceeds purgeAt.
+    // R2 purge — OPTIONAL.  Only runs when an R2 metric exceeds its purgeAt —
+    // breaches on other services never purge R2 data.
     // Add one entry per bucket you want to purge.
     //
     // Example (uncomment and fill in real values):
@@ -98,7 +103,8 @@ export const CONFIG: AppConfig = {
     r2: [],
 
     // -----------------------------------------------------------------------
-    // D1 purge — OPTIONAL.  Only runs when a storage metric exceeds purgeAt.
+    // D1 purge — OPTIONAL.  Only runs when a D1 metric exceeds its purgeAt —
+    // breaches on other services never purge D1 data.
     // Add one entry per database you want to purge.
     //
     // Example (uncomment and fill in real values):

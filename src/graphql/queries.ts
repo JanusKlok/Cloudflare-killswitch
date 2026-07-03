@@ -27,3 +27,17 @@ export function utcMonthStart(): string {
   const d = new Date();
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-01T00:00:00Z`;
 }
+
+// The two below are for `date_geq`/`date_leq` filters, which take a Date
+// (YYYY-MM-DD) rather than a Time — a full timestamp is rejected there.
+
+/** Current UTC calendar day. */
+export function utcToday(): string {
+  return isoDate(new Date());
+}
+
+/** First day of the current UTC month. */
+export function utcMonthStartDate(): string {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-01`;
+}

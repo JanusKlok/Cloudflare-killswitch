@@ -93,11 +93,12 @@ Write-Ok "KV namespace: $kvId"
 Write-Section "Required configuration"
 
 Write-Host "  zone    -> protect a single zone, works on the free plan  [default]"
-Write-Host "  account -> protect all zones, requires a paid Cloudflare plan`n"
-Write-Ask "WAF scope [zone/account]"
+Write-Host "  account -> protect all zones, requires an Enterprise plan"
+Write-Host "  none    -> no WAF rule; for accounts without a domain (workers.dev / pages.dev only)`n"
+Write-Ask "WAF scope [zone/account/none]"
 $scope = Read-Value
 if (-not $scope) { $scope = 'zone' }
-if ($scope -notin @('zone', 'account')) { Fail "Scope must be 'zone' or 'account'" }
+if ($scope -notin @('zone', 'account', 'none')) { Fail "Scope must be 'zone', 'account' or 'none'" }
 
 Write-Host ""
 Write-Ask "Cloudflare Account ID"
@@ -114,7 +115,11 @@ if ($scope -eq 'zone') {
   if (-not $zoneId) { Fail "Zone ID is required when scope is 'zone'" }
 }
 
-$tokenPerms = if ($scope -eq 'zone') { 'Zone -> WAF -> Edit' } else { 'Account -> Account WAF -> Edit' }
+$tokenPerms = switch ($scope) {
+  'zone'    { 'Zone -> WAF -> Edit' }
+  'account' { 'Account -> Account WAF -> Edit' }
+  'none'    { 'Workers Scripts / Cloudflare Pages -> Edit, depending on the blocking choices below' }
+}
 Write-Host ""
 Write-Ask "Cloudflare API Token  (needs $tokenPerms)"
 Write-Host "    Create at: dash.cloudflare.com/profile/api-tokens" -ForegroundColor DarkGray
@@ -156,6 +161,11 @@ if ($enableEmail) {
 Write-Section "Workers and Pages blocking (optional)"
 Write-Host "  WAF rules block traffic on your custom domain, but NOT on .workers.dev"
 Write-Host "  or .pages.dev subdomains. Configure these to also shut those down.`n"
+
+if ($scope -eq 'none') {
+  Write-Host "  NOTE: with scope 'none' this is the ONLY protection the kill switch has." -ForegroundColor Yellow
+  Write-Host "  Choose 'all' below unless you have a reason not to.`n" -ForegroundColor Yellow
+}
 
 $blockWorkersChoice = 'none'
 Write-Ask "Disable workers.dev subdomains on kill?"
@@ -220,25 +230,30 @@ Write-Ok "wrangler.toml updated"
 Write-Info "Updating src/config.ts..."
 $cfg = Get-Content src/config.ts -Raw
 
-$cfg = $cfg.Replace("scope: 'zone'", "scope: '$scope'")
-$cfg = $cfg.Replace('autoResetOnFirstOfMonth: true',
-                    "autoResetOnFirstOfMonth: $($autoReset.ToString().ToLower())")
-$cfg = $cfg.Replace('enableRecoveryWebhook: true',
-                    "enableRecoveryWebhook: $($enableWebhook.ToString().ToLower())")
+# Regex anchors (not literal defaults) so the script also works on a config.ts
+# that was previously customised by hand or by an earlier setup run.
+$cfg = [regex]::Replace($cfg, "scope: '(?:zone|account|none)'", "scope: '$scope'")
+$cfg = [regex]::Replace($cfg, 'autoResetOnFirstOfMonth: (?:true|false)',
+                        "autoResetOnFirstOfMonth: $($autoReset.ToString().ToLower())")
+$cfg = [regex]::Replace($cfg, 'enableRecoveryWebhook: (?:true|false)',
+                        "enableRecoveryWebhook: $($enableWebhook.ToString().ToLower())")
 
-# Apply blocking config — replace the empty defaults if user opted in.
-if ($blockWorkersChoice -eq 'all') {
-  $cfg = $cfg.Replace('workers: [] as string[],', "workers: 'all' as 'all' | string[],")
-} elseif ($blockWorkersChoice -eq 'list' -and $blockWorkersList.Count -gt 0) {
-  $quoted = ($blockWorkersList | ForEach-Object { "'$_'" }) -join ', '
-  $cfg = $cfg.Replace('workers: [] as string[],', "workers: [$quoted] as string[],")
+# Matches "workers: 'all'," / "workers: [...]," with or without an `as` cast.
+$workersPattern = "workers: (?:'all'(?: as 'all' \| string\[\])?|\[[^\]]*\](?: as string\[\])?),"
+$pagesPattern   = "pages: (?:'all'(?: as 'all' \| string\[\])?|\[[^\]]*\](?: as string\[\])?),"
+
+$workersValue = switch ($blockWorkersChoice) {
+  'all'  { "'all'" }
+  'list' { '[' + (($blockWorkersList | ForEach-Object { "'$_'" }) -join ', ') + ']' }
+  default { '[]' }
 }
-if ($blockPagesChoice -eq 'all') {
-  $cfg = $cfg.Replace('pages: [] as string[],', "pages: 'all' as 'all' | string[],")
-} elseif ($blockPagesChoice -eq 'list' -and $blockPagesList.Count -gt 0) {
-  $quoted = ($blockPagesList | ForEach-Object { "'$_'" }) -join ', '
-  $cfg = $cfg.Replace('pages: [] as string[],', "pages: [$quoted] as string[],")
+$pagesValue = switch ($blockPagesChoice) {
+  'all'  { "'all'" }
+  'list' { '[' + (($blockPagesList | ForEach-Object { "'$_'" }) -join ', ') + ']' }
+  default { '[]' }
 }
+$cfg = [regex]::Replace($cfg, $workersPattern, "workers: $workersValue,")
+$cfg = [regex]::Replace($cfg, $pagesPattern,   "pages: $pagesValue,")
 
 [System.IO.File]::WriteAllText("$PWD\src\config.ts", $cfg)
 Write-Ok "src/config.ts updated"
@@ -256,8 +271,9 @@ if ($enableWebhook) {
 # ── Deploy ──────────────────────────────────────────────────────────────────────
 Write-Host ""
 if (Ask-YesNo "Deploy now?" -Default $true) {
-  Write-Info "Deploying..."
-  pnpm exec wrangler deploy
+  Write-Info "Validating configuration and deploying..."
+  pnpm run deploy
+  if ($LASTEXITCODE -ne 0) { Fail "Deploy aborted — fix the issues reported above and run 'pnpm run deploy'" }
   Write-Ok "Deployed!"
 }
 

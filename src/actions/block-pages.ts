@@ -23,6 +23,7 @@ interface CfApiResult<T> {
 
 interface PagesProject {
   canonical_deployment?: { id: string } | null;
+  production_branch?: string;
 }
 
 interface PagesProjectListItem {
@@ -101,11 +102,19 @@ export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[
         console.warn(`block-pages: ${project} has no production deployment — skipping`);
         return;
       }
+      // Pages treats a deployment as production only when its branch matches the
+      // project's production branch — any other branch becomes a preview deployment
+      // that leaves the live site untouched.
+      const productionBranch = proj.production_branch;
+      if (!productionBranch) {
+        console.warn(`block-pages: ${project} has no production_branch — skipping`);
+        return;
+      }
 
       const form = new FormData();
       form.append('manifest', '{}');
       form.append('_worker.bundle', bundle, '_worker.bundle');
-      form.append('branch', 'killswitch');
+      form.append('branch', productionBranch);
       form.append('commit_message', 'Kill switch activated');
 
       // NOTE: do not retry this request — Pages deployment creation is non-idempotent.
@@ -126,10 +135,12 @@ export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[
   return blocked;
 }
 
-/** Rolls each Pages project back to its pre-kill deployment.  Failures are logged and skipped. */
-export async function restorePages(env: Env, blocked: BlockedPage[]): Promise<void> {
+/** Rolls each Pages project back to its pre-kill deployment.
+ *  Returns the entries that FAILED to roll back so callers can keep them
+ *  recorded for a retry instead of silently losing them. */
+export async function restorePages(env: Env, blocked: BlockedPage[]): Promise<BlockedPage[]> {
   const accountId = encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID);
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     blocked.map(({ project, previousDeploymentId }) =>
       cfJson<unknown>(
         env,
@@ -138,4 +149,5 @@ export async function restorePages(env: Env, blocked: BlockedPage[]): Promise<vo
       ),
     ),
   );
+  return blocked.filter((_, i) => results[i]?.status === 'rejected');
 }

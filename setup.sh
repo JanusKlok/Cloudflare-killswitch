@@ -78,10 +78,11 @@ ok "KV namespace: $KV_ID"
 section "Required configuration"
 
 printf "  zone    → protect a single zone, works on the free plan  [default]\n"
-printf "  account → protect all zones, requires a paid Cloudflare plan\n\n"
-ask "WAF scope [zone/account]"
+printf "  account → protect all zones, requires an Enterprise plan\n"
+printf "  none    → no WAF rule; for accounts without a domain (workers.dev / pages.dev only)\n\n"
+ask "WAF scope [zone/account/none]"
 read -r SCOPE; SCOPE=${SCOPE:-zone}
-[[ "$SCOPE" == "zone" || "$SCOPE" == "account" ]] || die "Scope must be 'zone' or 'account'"
+[[ "$SCOPE" == "zone" || "$SCOPE" == "account" || "$SCOPE" == "none" ]] || die "Scope must be 'zone', 'account' or 'none'"
 
 printf "\n"
 ask "Cloudflare Account ID\n     https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/"
@@ -96,8 +97,11 @@ if [ "$SCOPE" = "zone" ]; then
   [ -z "$ZONE_ID" ] && die "Zone ID is required when scope is 'zone'"
 fi
 
-if [ "$SCOPE" = "zone" ]; then TOKEN_PERMS="Zone → WAF → Edit"
-else TOKEN_PERMS="Account → Account WAF → Edit"; fi
+case "$SCOPE" in
+  zone)    TOKEN_PERMS="Zone → WAF → Edit" ;;
+  account) TOKEN_PERMS="Account → Account WAF → Edit" ;;
+  none)    TOKEN_PERMS="Workers Scripts / Cloudflare Pages → Edit, depending on the blocking choices below" ;;
+esac
 printf "\n"
 ask "Cloudflare API Token  (needs $TOKEN_PERMS)\n     Create at: dash.cloudflare.com/profile/api-tokens"
 read -rs API_TOKEN; printf "\n"
@@ -138,6 +142,11 @@ fi
 section "Workers and Pages blocking (optional)"
 printf "  WAF rules block traffic on your custom domain, but NOT on .workers.dev\n"
 printf "  or .pages.dev subdomains. Configure these to also shut those down.\n\n"
+
+if [ "$SCOPE" = "none" ]; then
+  printf "${Y}  NOTE: with scope 'none' this is the ONLY protection the kill switch has.\n"
+  printf "  Choose 'all' below unless you have a reason not to.${N}\n\n"
+fi
 
 BLOCK_WORKERS_CHOICE="none"
 ask "Disable workers.dev subdomains on kill?\n     [n]one (default) | [a]ll discovered scripts | [l]ist specific names"
@@ -233,28 +242,30 @@ with open('wrangler.toml', 'w') as f:
 with open('src/config.ts') as f:
     c = f.read()
 
-c = c.replace("scope: 'zone'",              f"scope: '{scope}'")
-c = c.replace('autoResetOnFirstOfMonth: true',  f'autoResetOnFirstOfMonth: {auto_reset}')
-c = c.replace('enableRecoveryWebhook: true',    f'enableRecoveryWebhook: {enable_webhook}')
+# Regex anchors (not literal defaults) so the script also works on a config.ts
+# that was previously customised by hand or by an earlier setup run.
+c = re.sub(r"scope: '(?:zone|account|none)'",           f"scope: '{scope}'", c)
+c = re.sub(r'autoResetOnFirstOfMonth: (?:true|false)',  f'autoResetOnFirstOfMonth: {auto_reset}', c)
+c = re.sub(r'enableRecoveryWebhook: (?:true|false)',    f'enableRecoveryWebhook: {enable_webhook}', c)
 
 block_workers_choice = os.environ.get('BLOCK_WORKERS_CHOICE', 'none')
 block_workers_list   = [s for s in (os.environ.get('BLOCK_WORKERS_LIST', '') or '').split(',') if s.strip()]
+block_pages_choice   = os.environ.get('BLOCK_PAGES_CHOICE', 'none')
 block_pages_list     = [s for s in (os.environ.get('BLOCK_PAGES_LIST',   '') or '').split(',') if s.strip()]
 
-if block_workers_choice == 'all':
-    c = c.replace('workers: [] as string[],', "workers: 'all' as 'all' | string[],")
-elif block_workers_choice == 'list' and block_workers_list:
-    quoted = ', '.join(f"'{s.strip()}'" for s in block_workers_list)
-    c = c.replace('workers: [] as string[],', f'workers: [{quoted}] as string[],')
+# Matches "workers: 'all'," / "workers: [...]," with or without an `as` cast.
+workers_re = r"workers: (?:'all'(?: as 'all' \| string\[\])?|\[[^\]]*\](?: as string\[\])?),"
+pages_re   = r"pages: (?:'all'(?: as 'all' \| string\[\])?|\[[^\]]*\](?: as string\[\])?),"
 
-block_pages_choice = os.environ.get('BLOCK_PAGES_CHOICE', 'none')
-if block_pages_choice == 'all':
-    c = c.replace('pages: [] as string[],', "pages: 'all' as 'all' | string[],")
-elif block_pages_choice == 'list' and block_pages_list:
-    quoted = ', '.join(f"'{s.strip()}'" for s in block_pages_list)
-    c = c.replace('pages: [] as string[],', f'pages: [{quoted}] as string[],')
-else:
-    pass
+def blocking_value(choice, names):
+    if choice == 'all':
+        return "'all'"
+    if choice == 'list' and names:
+        return '[' + ', '.join(f"'{s.strip()}'" for s in names) + ']'
+    return '[]'
+
+c = re.sub(workers_re, f"workers: {blocking_value(block_workers_choice, block_workers_list)},", c)
+c = re.sub(pages_re,   f"pages: {blocking_value(block_pages_choice, block_pages_list)},",       c)
 
 with open('src/config.ts', 'w') as f:
     f.write(c)
@@ -274,8 +285,8 @@ fi
 # ── Deploy ──────────────────────────────────────────────────────────────────────
 printf "\n"
 if yn "Deploy now?" Y; then
-  info "Deploying..."
-  pnpm exec wrangler deploy
+  info "Validating configuration and deploying..."
+  pnpm run deploy || die "Deploy aborted — fix the issues reported above and run 'pnpm run deploy'"
   ok "Deployed!"
 fi
 

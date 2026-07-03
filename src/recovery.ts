@@ -1,8 +1,6 @@
 import type { AppConfig, Env } from './types.js';
 import { readState, writeActive } from './state.js';
-import { removeBlockRule } from './actions/waf.js';
-import { enableWorkers } from './actions/block-workers.js';
-import { restorePages } from './actions/block-pages.js';
+import { restoreFromState } from './restore.js';
 
 const RATE_LIMIT_KEY = 'restore-attempts';
 const RATE_WINDOW_MS = 60_000;
@@ -21,9 +19,14 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 /** Rolling-window rate limit on /restore.  Defense-in-depth — the 32-byte
  *  RECOVERY_SECRET is the primary brute-force defense.  KV reads are
- *  eventually consistent (~60 s), so this is a soft cap, not a hard one. */
-async function checkAndRecordAttempt(env: Env): Promise<boolean> {
-  const raw = await env.KILL_SWITCH_STATE.get(RATE_LIMIT_KEY);
+ *  eventually consistent (~60 s), so this is a soft cap, not a hard one.
+ *  Keyed per client IP: /restore is exempt from the WAF block, so a global
+ *  budget would let an attacker spam requests and lock the real operator
+ *  out of recovery during an incident. */
+async function checkAndRecordAttempt(env: Env, request: Request): Promise<boolean> {
+  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+  const key = `${RATE_LIMIT_KEY}:${ip}`;
+  const raw = await env.KILL_SWITCH_STATE.get(key);
   const now = Date.now();
   let attempts: number[] = [];
   if (raw) {
@@ -37,7 +40,8 @@ async function checkAndRecordAttempt(env: Env): Promise<boolean> {
   attempts = attempts.filter((t) => now - t < RATE_WINDOW_MS);
   if (attempts.length >= RATE_MAX_ATTEMPTS) return false;
   attempts.push(now);
-  await env.KILL_SWITCH_STATE.put(RATE_LIMIT_KEY, JSON.stringify(attempts));
+  // TTL keeps per-IP keys from accumulating in KV (60 is the KV minimum).
+  await env.KILL_SWITCH_STATE.put(key, JSON.stringify(attempts), { expirationTtl: 120 });
   return true;
 }
 
@@ -51,7 +55,18 @@ export async function handleFetch(
     return new Response(null, { status: 404 });
   }
 
-  if (!(await checkAndRecordAttempt(env))) {
+  // Fail closed if the secret was never set: env.RECOVERY_SECRET is typed as
+  // string but is undefined at runtime until `wrangler secret put` — without
+  // this guard the literal string "Bearer undefined" would authenticate.
+  if (!env.RECOVERY_SECRET) {
+    console.error('RECOVERY_SECRET is not set — refusing /restore');
+    return new Response(JSON.stringify({ error: 'Recovery secret not configured' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  if (!(await checkAndRecordAttempt(env, request))) {
     return new Response(JSON.stringify({ error: 'Too Many Requests' }), {
       status: 429,
       headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
@@ -70,26 +85,17 @@ export async function handleFetch(
   const previousReason = state.reason;
 
   if (state.status === 'killed') {
-    // Restore in reverse kill order; run all three concurrently — they touch
-    // independent resources, so a Pages failure shouldn't delay WAF removal.
-    await Promise.allSettled([
-      state.blockedPagesProjects?.length
-        ? restorePages(env, state.blockedPagesProjects).catch((err: unknown) =>
-            console.error('restore-pages error:', err),
-          )
-        : Promise.resolve(),
-      state.disabledWorkerScripts?.length
-        ? enableWorkers(env, state.disabledWorkerScripts).catch((err: unknown) =>
-            console.error('enable-workers error:', err),
-          )
-        : Promise.resolve(),
-      state.wafRuleId && state.wafRulesetId
-        ? removeBlockRule(env, cfg, state.wafRuleId, state.wafRulesetId)
-        : Promise.resolve(),
-    ]);
+    const { fullyRestored, errors } = await restoreFromState(env, cfg, state);
+    if (!fullyRestored) {
+      console.error('partial restore failure:', errors.join('; '));
+      return new Response(JSON.stringify({ restored: false, previousReason, errors }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  } else {
+    await writeActive(env);
   }
-
-  await writeActive(env);
 
   return new Response(JSON.stringify({ restored: true, previousReason }), {
     status: 200,

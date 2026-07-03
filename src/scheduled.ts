@@ -1,9 +1,10 @@
 import type { AppConfig, Breach, Env } from './types.js';
-import { readState, shouldAutoReset, writeActive, writeKilled } from './state.js';
+import { readState, shouldAutoReset, writeKilled } from './state.js';
+import { restoreFromState } from './restore.js';
 import { MODULES } from './metrics/index.js';
-import { deployBlockRule, removeBlockRule } from './actions/waf.js';
-import { disableWorkers, enableWorkers } from './actions/block-workers.js';
-import { blockPages, restorePages, type BlockedPage } from './actions/block-pages.js';
+import { deployBlockRule } from './actions/waf.js';
+import { disableWorkers } from './actions/block-workers.js';
+import { blockPages, type BlockedPage } from './actions/block-pages.js';
 import { sendAlert } from './actions/email.js';
 import { purgeR2 } from './actions/purge-r2.js';
 import { purgeD1 } from './actions/purge-d1.js';
@@ -39,23 +40,13 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
 
   if (state.status === 'killed') {
     if (shouldAutoReset(state, cfg.autoResetOnFirstOfMonth)) {
-      // Auto-reset on the 1st of the month — restore concurrently.
-      await Promise.allSettled([
-        state.blockedPagesProjects?.length
-          ? restorePages(env, state.blockedPagesProjects).catch((err: unknown) =>
-              console.error('auto-reset restore-pages error:', err),
-            )
-          : Promise.resolve(),
-        state.disabledWorkerScripts?.length
-          ? enableWorkers(env, state.disabledWorkerScripts).catch((err: unknown) =>
-              console.error('auto-reset enable-workers error:', err),
-            )
-          : Promise.resolve(),
-        state.wafRuleId && state.wafRulesetId
-          ? removeBlockRule(env, cfg, state.wafRuleId, state.wafRulesetId)
-          : Promise.resolve(),
-      ]);
-      await writeActive(env);
+      // Auto-reset on the 1st of the month.
+      const { fullyRestored, errors } = await restoreFromState(env, cfg, state);
+      if (!fullyRestored) {
+        // Remnants stay recorded in the killed state — retry via /restore.
+        console.error('auto-reset: partial restore failure:', errors.join('; '));
+        return;
+      }
       // Continue monitoring after reset.
     } else {
       return; // Already killed — no-op.
@@ -92,8 +83,26 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
     return;
   }
 
-  // Deploy WAF block rule first (bleeding stops first).
-  const { ruleId: wafRuleId, rulesetId: wafRulesetId } = await deployBlockRule(env, cfg);
+  const purgeBreaches = allBreaches.filter((b) => b.severity === 'purge');
+  const blockBreaches = allBreaches.filter((b) => b.severity === 'block');
+  const reason =
+    purgeBreaches.length > 0
+      ? `${purgeBreaches.length} purge breach(es), ${blockBreaches.length} block breach(es)`
+      : `${blockBreaches.length} block breach(es)`;
+
+  // Deploy WAF block rule first (bleeding stops first).  scope 'none' means
+  // there is no zone to protect — blocking.workers/pages is the whole kill.
+  let wafRuleId: string | undefined;
+  let wafRulesetId: string | undefined;
+  if (cfg.scope !== 'none') {
+    ({ ruleId: wafRuleId, rulesetId: wafRulesetId } = await deployBlockRule(env, cfg));
+  }
+
+  // Record the kill immediately: if the Worker dies mid-kill, an unrecorded
+  // WAF rule would be orphaned (never removable via /restore) and the next
+  // tick would re-fire the whole kill — stacking rules and re-running purges.
+  // The final writeKilled below enriches this with the full action results.
+  await writeKilled(env, { reason, wafRuleId, wafRulesetId });
 
   // Disable workers.dev subdomains and block Pages projects in parallel.
   const [disabledWorkerScripts, blockedPagesProjects] = await Promise.all([
@@ -101,12 +110,14 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
     blockPages(env, cfg).catch((err: unknown) => { console.error('block-pages error:', err); return [] as BlockedPage[]; }),
   ]);
 
-  // Run purge actions for 'purge'-severity breaches.
-  const purgeBreaches = allBreaches.filter((b) => b.severity === 'purge');
+  // Run purge actions, scoped to the breaching service: purging deletes data
+  // permanently, so an unrelated breach (e.g. a workers request spike) must
+  // never wipe R2 buckets or D1 tables.
+  const purgedServices = new Set(purgeBreaches.map((b) => b.service));
   const r2Results: PurgeResult[] = [];
   const d1Results: D1PurgeResult[] = [];
 
-  if (purgeBreaches.length > 0) {
+  if (purgedServices.has('r2')) {
     for (const target of cfg.purgeConfig.r2) {
       try {
         r2Results.push(await purgeR2(env, target));
@@ -114,6 +125,8 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
         r2Results.push({ bindingName: target.bindingName, deleted: 0, errors: [String(err)] });
       }
     }
+  }
+  if (purgedServices.has('d1')) {
     for (const target of cfg.purgeConfig.d1) {
       try {
         d1Results.push(await purgeD1(env, target));
@@ -123,23 +136,21 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
     }
   }
 
-  // Build and send alert email.
-  const blockBreaches = allBreaches.filter((b) => b.severity === 'block');
-  const reason =
-    purgeBreaches.length > 0
-      ? `${purgeBreaches.length} purge breach(es), ${blockBreaches.length} block breach(es)`
-      : `${blockBreaches.length} block breach(es)`;
-
   const emailLines: string[] = [
-    'Kill Switch triggered. WAF block rule deployed.',
+    wafRuleId ? 'Kill Switch triggered. WAF block rule deployed.' : 'Kill Switch triggered.',
     '',
     'Breaches detected:',
     breachSummary(allBreaches),
-    '',
-    `WAF rule ID : ${wafRuleId}`,
-    `WAF ruleset : ${wafRulesetId}`,
-    `Scope       : ${cfg.scope}`,
   ];
+
+  if (wafRuleId) {
+    emailLines.push(
+      '',
+      `WAF rule ID : ${wafRuleId}`,
+      `WAF ruleset : ${wafRulesetId}`,
+      `Scope       : ${cfg.scope}`,
+    );
+  }
 
   if (disabledWorkerScripts.length > 0) {
     emailLines.push('', `Workers disabled (${disabledWorkerScripts.length}): ${disabledWorkerScripts.join(', ')}`);
@@ -174,10 +185,15 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
     emailLines.push('', 'To restore: POST /restore with Authorization: Bearer <RECOVERY_SECRET>');
   }
 
-  await sendAlert(env, '[Kill Switch] Traffic blocked — limits breached', emailLines.join('\n'));
+  // A transient email failure must never prevent the kill from being recorded
+  // below — an unrecorded kill would re-fire every tick (stacking WAF rules,
+  // orphaning the first rule's ID, and re-running purges).
+  try {
+    await sendAlert(env, '[Kill Switch] Traffic blocked — limits breached', emailLines.join('\n'));
+  } catch (err) {
+    console.error('alert email failed:', err);
+  }
 
-  // Write killed state last — so a transient email failure doesn't prevent
-  // the kill from being recorded (and therefore preventing recovery).
   await writeKilled(env, {
     reason,
     wafRuleId,

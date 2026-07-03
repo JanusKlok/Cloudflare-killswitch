@@ -1,6 +1,6 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { utcDayStart, utcMonthStart, utcNow } from '../graphql/queries.js';
+import { utcMonthStartDate, utcToday } from '../graphql/queries.js';
 import { evaluateSample } from './evaluate.js';
 
 interface D1OpsData {
@@ -14,7 +14,10 @@ interface D1OpsData {
 interface D1StorageData {
   viewer: {
     accounts: {
-      d1StorageAdaptiveGroups: { max: { databaseSizeBytes: number } }[];
+      d1StorageAdaptiveGroups: {
+        max: { databaseSizeBytes: number };
+        dimensions: { databaseId: string };
+      }[];
     }[];
   };
 }
@@ -38,7 +41,7 @@ export const d1Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcDayStart(), end: utcNow() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcToday(), end: utcToday() },
       ),
       gql<D1StorageData>(
         env,
@@ -50,11 +53,12 @@ export const d1Module: ServiceModule = {
                 filter: { date_geq: $start, date_leq: $end }
               ) {
                 max { databaseSizeBytes }
+                dimensions { databaseId }
               }
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStart(), end: utcNow() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStartDate(), end: utcToday() },
       ),
     ]);
 
@@ -62,9 +66,16 @@ export const d1Module: ServiceModule = {
     const rowReads = opsRows.reduce((sum, r) => sum + r.sum.rowsRead, 0);
     const rowWrites = opsRows.reduce((sum, r) => sum + r.sum.rowsWritten, 0);
 
-    // Sum databaseSizeBytes across all databases to get account-total D1 storage.
+    // The 5 GB free-tier limit is account-wide, so sum the per-database maxes —
+    // an ungrouped max would only report the single largest database.
     const storageRows = storageData.viewer.accounts[0]?.d1StorageAdaptiveGroups ?? [];
-    const storageBytes = storageRows.reduce((sum, r) => sum + r.max.databaseSizeBytes, 0);
+    const perDatabaseMax = new Map<string, number>();
+    for (const r of storageRows) {
+      const id = r.dimensions.databaseId;
+      perDatabaseMax.set(id, Math.max(perDatabaseMax.get(id) ?? 0, r.max.databaseSizeBytes));
+    }
+    let storageBytes = 0;
+    for (const v of perDatabaseMax.values()) storageBytes += v;
 
     return [
       { metric: 'rowReads', value: rowReads, window: 'day' },

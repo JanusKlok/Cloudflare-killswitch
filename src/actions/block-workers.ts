@@ -72,7 +72,10 @@ export async function disableWorkers(env: Env, cfg: AppConfig): Promise<string[]
     .map((r) => r.value);
 }
 
-/** Re-enables the workers.dev subdomain for each named script. */
-export async function enableWorkers(env: Env, scriptNames: string[]): Promise<void> {
-  await Promise.allSettled(scriptNames.map((name) => setSubdomain(env, name, true)));
+/** Re-enables the workers.dev subdomain for each named script.
+ *  Returns the names of scripts that FAILED to re-enable so callers can keep
+ *  them recorded for a retry instead of silently losing them. */
+export async function enableWorkers(env: Env, scriptNames: string[]): Promise<string[]> {
+  const results = await Promise.allSettled(scriptNames.map((name) => setSubdomain(env, name, true)));
+  return scriptNames.filter((_, i) => results[i]?.status === 'rejected');
 }

@@ -61,8 +61,9 @@ On each cron tick (default: every 5 minutes, configurable in wrangler.toml):
           (POST /restore is exempted so you can still recover)
        b. Disable the workers.dev subdomain for configured Workers scripts
        c. Deploy a 503 Worker to configured Pages projects (saves current deployment ID)
-       d. For any metric that also exceeds purgeAt: run the configured
-          R2 / D1 purge actions (destructive — opt-in only)
+       d. If an R2 metric exceeds purgeAt: run the configured R2 purge actions;
+          if a D1 metric exceeds purgeAt: run the configured D1 purge actions
+          (destructive — opt-in only; other services never trigger purges)
        e. Send email alert with breach details and all blocking results
        f. Write 'killed' state to KV including WAF rule ID, disabled Workers,
           and blocked Pages deployment IDs
@@ -72,7 +73,8 @@ POST /restore:
   2. Roll back Pages projects to their pre-kill production deployments
   3. Re-enable the workers.dev subdomain for each disabled Workers script
   4. Delete the WAF rule via the Cloudflare API
-  5. Write 'active' state to KV
+  5. Write 'active' state to KV (on partial failure the state stays
+     'killed' with only the failed items, so a retry picks them up)
   6. Return { restored: true, previousReason: "..." }
 ```
 
@@ -102,7 +104,7 @@ All IDs are stored so `POST /restore` can undo each action precisely — no manu
 - **Node.js 22+** and **pnpm** (`npm install -g pnpm`)
 - **Wrangler CLI** — installed automatically as a dev dependency; use `pnpm exec wrangler` or add it to your PATH
 
-> **Free plan vs paid plan:** The default `scope: 'zone'` in `config.ts` deploys WAF rules to a single zone and works on the **free plan**. Setting `scope: 'account'` deploys an account-wide WAF rule and **requires a paid Cloudflare plan**. Most users should leave this at `'zone'`.
+> **Free plan vs Enterprise:** The default `scope: 'zone'` in `config.ts` deploys WAF rules to a single zone and works on the **free plan**. Setting `scope: 'account'` deploys an account-wide WAF rule and **requires an Enterprise plan** (account-level custom rulesets are Enterprise-only). If your account has no domain at all (`workers.dev` / `pages.dev` only), use `scope: 'none'` together with `blocking.workers` / `blocking.pages`. Most users with a domain should leave this at `'zone'`.
 
 ---
 
@@ -201,7 +203,7 @@ id = "paste-your-kv-namespace-id-here"   # ← from step 3
 
 [vars]
 CLOUDFLARE_ACCOUNT_ID = "your-account-id"
-CLOUDFLARE_ZONE_ID    = "your-zone-id"   # ← skip if using scope = 'account'
+CLOUDFLARE_ZONE_ID    = "your-zone-id"   # ← skip if using scope = 'account' or 'none'
 ```
 
 See [How to find your account ID and zone ID](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/) in the Cloudflare docs.
@@ -244,7 +246,8 @@ Only edit this file if you want to:
 
 - Trigger earlier than the absolute limit — lower a `blockAt` value
 - Enable automatic data purge — add `purgeAt` to a storage metric (see [Optional: destructive purge](#optional-destructive-purge))
-- Protect all zones instead of one — change `scope` to `'account'` (requires a paid Cloudflare plan)
+- Protect all zones instead of one — change `scope` to `'account'` (requires an Enterprise plan)
+- No domain on the account at all — change `scope` to `'none'` and rely on `blocking.workers` / `blocking.pages`
 - Keep the block in place until you manually restore — set `autoResetOnFirstOfMonth: false`
 - Disable the recovery webhook entirely — set `enableRecoveryWebhook: false` (and skip `RECOVERY_SECRET` in step 5)
 
@@ -255,9 +258,15 @@ See the [Configuration reference](#configuration-reference) for full details on 
 At this point the worker is fully functional. Email alerts and data purge can be added later without redeploying from scratch — they are configured and enabled independently.
 
 ```
-pnpm typecheck   # optional — catches config mistakes before deploy
+pnpm typecheck   # optional — catches type errors before deploy
 pnpm test        # optional — runs the test suite against Miniflare
-pnpm exec wrangler deploy
+pnpm run deploy
+```
+
+`pnpm run deploy` first validates your configuration and only then runs `wrangler deploy`. The validator cross-checks `src/config.ts` against `wrangler.toml` and reports concrete fixes for anything that would break the deploy — or worse, make the kill switch silently do nothing when it fires (placeholder IDs, a missing zone ID with `scope: 'zone'`, `scope: 'none'` with no blocking configured, purge targets without matching bindings, and so on). It also prints the exact API-token permissions your configuration needs. You can run the check on its own at any time:
+
+```
+pnpm run validate
 ```
 
 After deploying, confirm the cron trigger is registered: **Workers & Pages → cloudflare-killswitch → Triggers → Cron Triggers**.
@@ -308,7 +317,7 @@ export const CONFIG: AppConfig = {
 ### scope
 
 ```ts
-scope: 'zone' | 'account'
+scope: 'zone' | 'account' | 'none'
 ```
 
 Controls which WAF the block rule is deployed to.
@@ -316,9 +325,10 @@ Controls which WAF the block rule is deployed to.
 | Value | WAF location | Plan required | What gets blocked |
 |-------|-------------|--------------|-------------------|
 | `'zone'` (default) | Zone WAF for `CLOUDFLARE_ZONE_ID` | Free | Traffic to that specific domain |
-| `'account'` | Account WAF | Paid | Traffic to all domains on the account |
+| `'account'` | Account WAF | Enterprise | Traffic to all domains on the account |
+| `'none'` | — (no WAF rule) | Free | Nothing via WAF — only `blocking.workers` / `blocking.pages` act on kill |
 
-Use `'zone'` unless you have a paid plan and want to protect all zones simultaneously.
+Use `'zone'` unless you have an Enterprise plan and want to protect all zones simultaneously. Use `'none'` when your account has no domain/zone at all (everything runs on `workers.dev` / `pages.dev`) — a WAF rule has nothing to attach to there, so you **must** configure `blocking.workers` / `blocking.pages` or the kill switch takes no action.
 
 ### autoResetOnFirstOfMonth
 
@@ -535,7 +545,7 @@ EMAIL_TO   = "you@example.com"            # must match destination_address above
 **3. Redeploy**
 
 ```
-pnpm exec wrangler deploy
+pnpm run deploy
 ```
 
 If any of `SEND_EMAIL`, `EMAIL_FROM`, or `EMAIL_TO` are absent, email is silently skipped. The kill switch still fires and traffic is still blocked — you just won't get a notification.
@@ -613,11 +623,13 @@ blocking: {
 
 Workers and Pages blocking run in parallel and are both best-effort — a failure in one does not prevent the other from executing. The WAF rule always fires first regardless.
 
+**Free-plan subrequest limit:** on the Workers Free plan each invocation is capped at 50 subrequests, and every Cloudflare API call, KV operation, and R2 list/delete made during a kill counts against it. A kill with `workers: 'all'` and `pages: 'all'` on an account with many scripts and projects — especially combined with an R2/D1 purge — can exceed the cap, leaving some scripts or projects unblocked (their failures are logged and skipped). If you have more than roughly 30 scripts + projects combined, prefer explicit lists of the ones that matter, or run the kill switch on a paid plan (1,000 subrequests).
+
 ---
 
 ## Optional: destructive purge
 
-In addition to blocking traffic, the worker can permanently delete data from R2 buckets and D1 databases when a storage metric crosses a second, higher `purgeAt` threshold.
+In addition to blocking traffic, the worker can permanently delete data from R2 buckets and D1 databases when a metric crosses a second, higher `purgeAt` threshold. Purges are scoped to the breaching service: only an R2 breach runs the R2 purge targets, and only a D1 breach runs the D1 purge targets — a breach on Workers, Pages, or KV never deletes data.
 
 **This action is irreversible.** Deleted data cannot be recovered. Purge is disabled by default and requires explicit configuration for each metric and each resource you want to purge.
 
@@ -692,7 +704,7 @@ bucket_name = "another-r2-bucket"
 **Step 4 — Redeploy**
 
 ```
-pnpm exec wrangler deploy
+pnpm run deploy
 ```
 
 ### D1 purge
@@ -750,7 +762,7 @@ Find the database UUID in the Cloudflare dashboard under Workers & Pages → D1.
 **Step 4 — Redeploy**
 
 ```
-pnpm exec wrangler deploy
+pnpm run deploy
 ```
 
 ---
@@ -808,7 +820,15 @@ curl -s -X POST https://cloudflare-killswitch.your-subdomain.workers.dev/restore
 { "error": "Unauthorized" }
 ```
 
-The call is idempotent — if the worker is already `active`, it returns `200` with `restored: true` anyway.
+**Partial failure (502):**
+
+```json
+{ "restored": false, "previousReason": "2 block breach(es)", "errors": ["workers not re-enabled: my-api"] }
+```
+
+Only the failed items remain recorded in the killed state — call `POST /restore` again to retry just those.
+
+The call is idempotent — if the worker is already `active`, it returns `200` with `restored: true` anyway. Requests are rate-limited to 10 per minute per client IP (`429` with a `Retry-After` header beyond that).
 
 The `POST /restore` endpoint is **exempt from the WAF block rule** when `enableRecoveryWebhook: true`, so it remains reachable even while all other traffic is blocked.
 
@@ -818,7 +838,7 @@ If you've lost your `RECOVERY_SECRET`, set a new one and redeploy:
 
 ```
 pnpm exec wrangler secret put RECOVERY_SECRET
-pnpm exec wrangler deploy
+pnpm run deploy
 ```
 
 ---
@@ -838,6 +858,8 @@ Create a **Custom Token** at `dash.cloudflare.com/profile/api-tokens`. Click "Cr
 | Permission group | Permission | Level |
 |------------------|-----------|-------|
 | Account → Account WAF | Edit | Account |
+
+**For `scope: 'none'`:** no WAF permission needed — only the `blocking.*` permissions below apply.
 
 **If `blocking.workers` is non-empty, add:**
 

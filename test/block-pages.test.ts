@@ -10,12 +10,13 @@ function makeProjectListResponse(...names: string[]) {
   return { success: true, errors: [], result: names.map((name) => ({ name })) };
 }
 
-function makeProjectResponse(deploymentId: string | null) {
+function makeProjectResponse(deploymentId: string | null, productionBranch: string | null = 'main') {
   return {
     success: true,
     errors: [],
     result: {
       canonical_deployment: deploymentId ? { id: deploymentId } : null,
+      ...(productionBranch === null ? {} : { production_branch: productionBranch }),
     },
   };
 }
@@ -69,6 +70,29 @@ describe('blockPages — with projects', () => {
     expect(deployInit.method).toBe('POST');
     // Body is FormData (not JSON), so Content-Type is NOT manually set to application/json.
     expect(deployInit.headers).not.toHaveProperty('Content-Type', 'application/json');
+  });
+
+  it("deploys to the project's production branch (a preview branch would not block the live site)", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(makeProjectResponse('d-1', 'release')), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(makeDeployResponse()), { status: 200 }));
+
+    const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['my-app'] } };
+    await blockPages(env, cfg);
+
+    const [, deployInit] = vi.mocked(fetch).mock.calls[1] as [string, RequestInit];
+    expect((deployInit.body as FormData).get('branch')).toBe('release');
+  });
+
+  it('skips project when production_branch is missing', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(makeProjectResponse('d-1', null)), { status: 200 }),
+    );
+
+    const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['my-app'] } };
+    const result = await blockPages(env, cfg);
+    expect(result).toEqual([]);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
   });
 
   it('skips project with no canonical deployment', async () => {
@@ -142,13 +166,13 @@ describe('restorePages', () => {
     expect(init.method).toBe('POST');
   });
 
-  it('does not throw when a rollback call fails', async () => {
+  it('returns the entries that failed to roll back instead of throwing', async () => {
     vi.mocked(fetch).mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify({ success: false, errors: [{ code: 8000, message: 'no previous deploy' }] }), { status: 400 })),
     );
     await expect(
       restorePages(env, [{ project: 'my-app', previousDeploymentId: 'bad-id' }]),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual([{ project: 'my-app', previousDeploymentId: 'bad-id' }]);
   });
 
   it('is a no-op for an empty array', async () => {

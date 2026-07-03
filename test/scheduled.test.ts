@@ -113,6 +113,31 @@ describe('runScheduled — purge breach', () => {
   });
 });
 
+describe('runScheduled — scope none (no zone on the account)', () => {
+  beforeEach(async () => { await writeActive(env); vi.stubGlobal('fetch', routedMock(100, 'rs-x', 'rule-x')); });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('kills without any WAF call and still disables workers', async () => {
+    const cfg: AppConfig = {
+      ...LOW_CFG,
+      scope: 'none',
+      blocking: { ...LOW_CFG.blocking, workers: ['victim-worker'] },
+    };
+    await runScheduled(env, cfg);
+
+    const state = await readState(env);
+    expect(state.status).toBe('killed');
+    expect(state.wafRuleId).toBeUndefined();
+    expect(state.wafRulesetId).toBeUndefined();
+    expect(state.disabledWorkerScripts).toEqual(['victim-worker']);
+
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) =>
+      typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url,
+    );
+    expect(urls.some((u) => u.includes('rulesets'))).toBe(false);
+  });
+});
+
 describe('runScheduled — already killed', () => {
   afterEach(() => vi.unstubAllGlobals());
 

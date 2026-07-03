@@ -18,8 +18,9 @@ export async function writeKilled(
   env: Env,
   opts: {
     reason: string;
-    wafRuleId: string;
-    wafRulesetId: string;
+    // Optional: a partial-restore remnant may have removed the WAF rule already.
+    wafRuleId?: string;
+    wafRulesetId?: string;
     disabledWorkerScripts?: string[];
     blockedPagesProjects?: KvState['blockedPagesProjects'];
   },
@@ -28,9 +29,9 @@ export async function writeKilled(
     status: 'killed',
     timestamp: new Date().toISOString(),
     reason: opts.reason,
-    wafRuleId: opts.wafRuleId,
-    wafRulesetId: opts.wafRulesetId,
   };
+  if (opts.wafRuleId) state.wafRuleId = opts.wafRuleId;
+  if (opts.wafRulesetId) state.wafRulesetId = opts.wafRulesetId;
   if (opts.disabledWorkerScripts?.length) state.disabledWorkerScripts = opts.disabledWorkerScripts;
   if (opts.blockedPagesProjects?.length) state.blockedPagesProjects = opts.blockedPagesProjects;
   await env.KILL_SWITCH_STATE.put(KV_KEY, JSON.stringify(state));
