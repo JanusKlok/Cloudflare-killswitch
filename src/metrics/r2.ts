@@ -1,6 +1,7 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { cycleStart, utcNow } from '../graphql/queries.js';
+import { cycleStart, utcHoursAgo, utcNow } from '../graphql/queries.js';
+import { STORAGE_WINDOW_HOURS, sumPerEntityMax } from './storage.js';
 import { evaluateSample } from './evaluate.js';
 
 // R2 operation classification.
@@ -80,7 +81,7 @@ export const r2Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStart(cfg), end: utcNow() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcHoursAgo(STORAGE_WINDOW_HOURS), end: utcNow() },
       ),
     ]);
 
@@ -91,18 +92,20 @@ export const r2Module: ServiceModule = {
       const t = row.dimensions.actionType;
       if (CLASS_A_OPS.has(t)) classAOps += row.sum.requests;
       else if (CLASS_B_OPS.has(t)) classBOps += row.sum.requests;
+      // Cloudflare adds operations over time. Without this an unrecognised
+      // name would be dropped from the billable total with no trace.
+      else console.warn(`r2: unclassified actionType "${t}" (${row.sum.requests} requests) counted in neither class`);
     }
 
-    // The 10 GB free-tier limit is account-wide, so sum the per-bucket maxes —
-    // an ungrouped max would only report the single largest bucket.
     const storageRows = storageData.viewer.accounts[0]?.r2StorageAdaptiveGroups ?? [];
-    const perBucketMax = new Map<string, number>();
-    for (const r of storageRows) {
-      const name = r.dimensions.bucketName;
-      perBucketMax.set(name, Math.max(perBucketMax.get(name) ?? 0, r.max.payloadSize));
-    }
-    let storageBytes = 0;
-    for (const v of perBucketMax.values()) storageBytes += v;
+    const storageBytes = sumPerEntityMax(
+      'r2',
+      'r2StorageAdaptiveGroups.max.payloadSize',
+      storageRows,
+      (r) => r.dimensions.bucketName,
+      (r) => r.max.payloadSize,
+      opsRows.length > 0,
+    );
 
     return [
       { metric: 'storageBytes', value: storageBytes, window: 'cycle' },

@@ -1,6 +1,7 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { cycleStartDate, utcToday } from '../graphql/queries.js';
+import { utcDaysAgo, utcToday } from '../graphql/queries.js';
+import { STORAGE_WINDOW_DAYS, sumPerEntityMax } from './storage.js';
 import { evaluateSample } from './evaluate.js';
 
 interface D1OpsData {
@@ -25,7 +26,7 @@ interface D1StorageData {
 export const d1Module: ServiceModule = {
   name: 'd1',
 
-  async fetchUsage(env: Env, cfg: AppConfig): Promise<MetricSample[]> {
+  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
     const [opsData, storageData] = await Promise.all([
       gql<D1OpsData>(
         env,
@@ -58,7 +59,7 @@ export const d1Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStartDate(cfg), end: utcToday() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcDaysAgo(STORAGE_WINDOW_DAYS), end: utcToday() },
       ),
     ]);
 
@@ -66,16 +67,15 @@ export const d1Module: ServiceModule = {
     const rowReads = opsRows.reduce((sum, r) => sum + r.sum.rowsRead, 0);
     const rowWrites = opsRows.reduce((sum, r) => sum + r.sum.rowsWritten, 0);
 
-    // The 5 GB free-tier limit is account-wide, so sum the per-database maxes —
-    // an ungrouped max would only report the single largest database.
     const storageRows = storageData.viewer.accounts[0]?.d1StorageAdaptiveGroups ?? [];
-    const perDatabaseMax = new Map<string, number>();
-    for (const r of storageRows) {
-      const id = r.dimensions.databaseId;
-      perDatabaseMax.set(id, Math.max(perDatabaseMax.get(id) ?? 0, r.max.databaseSizeBytes));
-    }
-    let storageBytes = 0;
-    for (const v of perDatabaseMax.values()) storageBytes += v;
+    const storageBytes = sumPerEntityMax(
+      'd1',
+      'd1StorageAdaptiveGroups.max.databaseSizeBytes',
+      storageRows,
+      (r) => r.dimensions.databaseId,
+      (r) => r.max.databaseSizeBytes,
+      opsRows.length > 0,
+    );
 
     return [
       { metric: 'rowReads', value: rowReads, window: 'day' },

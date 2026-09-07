@@ -30,22 +30,23 @@ export function cycleStart(cfg: AppConfig): string {
   return `${isoDate(billingPeriodStart(new Date(), cfg.billingCycleDay))}T00:00:00Z`;
 }
 
-// The two below are for `date_geq`/`date_leq` filters, which take a Date
-// (YYYY-MM-DD) rather than a Time — a full timestamp is rejected there.
+// utcToday and utcDaysAgo are for `date_geq`/`date_leq` filters, which take a
+// Date (YYYY-MM-DD) rather than a Time — a full timestamp is rejected there.
 
 /** Current UTC calendar day. */
 export function utcToday(): string {
   return isoDate(new Date());
 }
 
-/** Calendar day the current billing period opened. */
-export function cycleStartDate(cfg: AppConfig): string {
-  return isoDate(billingPeriodStart(new Date(), cfg.billingCycleDay));
-}
-
-/** `days` calendar days before today, inclusive of today. */
+/** `days` calendar days before today. */
 export function utcDaysAgo(days: number): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - days);
   return isoDate(d);
+}
+
+/** `hours` before now, as a Time filter value. */
+export function utcHoursAgo(hours: number): string {
+  const d = new Date(Date.now() - hours * 3_600_000);
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }

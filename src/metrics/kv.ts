@@ -1,6 +1,7 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { cycleStartDate, utcDayStart, utcNow, utcToday } from '../graphql/queries.js';
+import { utcDayStart, utcDaysAgo, utcNow, utcToday } from '../graphql/queries.js';
+import { STORAGE_WINDOW_DAYS, sumPerEntityMax } from './storage.js';
 import { evaluateSample } from './evaluate.js';
 
 interface KvOpsData {
@@ -28,7 +29,7 @@ interface KvStorageData {
 export const kvModule: ServiceModule = {
   name: 'kv',
 
-  async fetchUsage(env: Env, cfg: AppConfig): Promise<MetricSample[]> {
+  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
     const [opsData, storageData] = await Promise.all([
       gql<KvOpsData>(
         env,
@@ -62,7 +63,7 @@ export const kvModule: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStartDate(cfg), end: utcToday() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcDaysAgo(STORAGE_WINDOW_DAYS), end: utcToday() },
       ),
     ]);
 
@@ -72,19 +73,22 @@ export const kvModule: ServiceModule = {
     for (const row of opsRows) {
       const t = row.dimensions.actionType;
       if (t === 'read') reads += row.sum.requests;
+      // Cloudflare meters write, delete and list separately; they are summed
+      // into one counter here, so the effective `writes` limit is the sum of
+      // all three. Deliberately conservative — it fires early, not late.
       else if (t === 'write' || t === 'delete' || t === 'list') writes += row.sum.requests;
+      else console.warn(`kv: unrecognised actionType "${t}" (${row.sum.requests} requests) not counted`);
     }
 
-    // The 1 GB free-tier limit is account-wide, so sum the per-namespace maxes —
-    // an ungrouped max would only report the single largest namespace.
     const storageRows = storageData.viewer.accounts[0]?.kvStorageAdaptiveGroups ?? [];
-    const perNamespaceMax = new Map<string, number>();
-    for (const r of storageRows) {
-      const id = r.dimensions.namespaceId;
-      perNamespaceMax.set(id, Math.max(perNamespaceMax.get(id) ?? 0, r.max.byteCount));
-    }
-    let storageBytes = 0;
-    for (const v of perNamespaceMax.values()) storageBytes += v;
+    const storageBytes = sumPerEntityMax(
+      'kv',
+      'kvStorageAdaptiveGroups.max.byteCount',
+      storageRows,
+      (r) => r.dimensions.namespaceId,
+      (r) => r.max.byteCount,
+      opsRows.length > 0,
+    );
 
     return [
       { metric: 'reads', value: reads, window: 'day' },
