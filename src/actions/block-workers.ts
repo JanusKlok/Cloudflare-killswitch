@@ -15,27 +15,29 @@ async function setSubdomain(env: Env, scriptName: string, enabled: boolean): Pro
   );
 }
 
-/** Disables the workers.dev subdomain for each script in cfg.blocking.workers.
- *  Returns the names of scripts that were successfully disabled. */
-export async function disableWorkers(env: Env, cfg: AppConfig): Promise<string[]> {
+/** Resolves cfg.blocking.workers into concrete script names without changing
+ *  anything.  Split from disableWorkers so the caller can record what it is
+ *  about to touch before touching it. */
+export async function resolveWorkerTargets(env: Env, cfg: AppConfig): Promise<string[]> {
   const workersCfg = cfg.blocking.workers;
-  if (Array.isArray(workersCfg) && workersCfg.length === 0) return [];
+  if (Array.isArray(workersCfg)) return [...workersCfg];
 
-  let scriptNames: string[];
-  if (workersCfg === 'all') {
-    if (!env.WORKER_SELF_NAME) {
-      throw new Error(
-        "blocking.workers: 'all' mode requires WORKER_SELF_NAME var in wrangler.toml — refusing to disable scripts without knowing the kill-switch's own name",
-      );
-    }
-    const scripts = await cfFetch<WorkerScript[]>(
-      env.CLOUDFLARE_API_TOKEN,
-      `/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID)}/workers/scripts`,
+  if (!env.WORKER_SELF_NAME) {
+    throw new Error(
+      "blocking.workers: 'all' mode requires WORKER_SELF_NAME var in wrangler.toml — refusing to disable scripts without knowing the kill-switch's own name",
     );
-    scriptNames = scripts.map((s) => s.id).filter((name) => name !== env.WORKER_SELF_NAME);
-  } else {
-    scriptNames = workersCfg;
   }
+  const scripts = await cfFetch<WorkerScript[]>(
+    env.CLOUDFLARE_API_TOKEN,
+    `/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID)}/workers/scripts`,
+  );
+  return scripts.map((s) => s.id).filter((name) => name !== env.WORKER_SELF_NAME);
+}
+
+/** Disables the workers.dev subdomain for each named script.
+ *  Returns the names of scripts that were successfully disabled. */
+export async function disableWorkers(env: Env, scriptNames: string[]): Promise<string[]> {
+  if (scriptNames.length === 0) return [];
 
   const results = await Promise.allSettled(
     scriptNames.map(async (name) => {

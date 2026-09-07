@@ -151,3 +151,138 @@ describe('runScheduled — already killed', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('runScheduled — kill durability', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** The window between "actions performed" and "actions recorded" is the one
+   *  place an isolate death leaves Workers dark and Pages serving 503 with
+   *  nothing in state to undo them. Targets must therefore be persisted before
+   *  the first mutating call. */
+  it('records its targets before it mutates anything', async () => {
+    const events: string[] = [];
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('graphql')) {
+        return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
+      }
+      if (url.includes('/subdomain')) {
+        events.push('mutate:subdomain');
+        return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
+      }
+      if (url.includes('/deployments') && init?.method === 'POST') {
+        events.push('mutate:pages-deploy');
+        return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
+      }
+      if (url.includes('/pages/projects/')) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            errors: [],
+            result: { canonical_deployment: { id: 'prev-1' }, production_branch: 'main' },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
+    }));
+
+    const originalPut = env.KILL_SWITCH_STATE.put.bind(env.KILL_SWITCH_STATE);
+    const putSpy = vi
+      .spyOn(env.KILL_SWITCH_STATE, 'put')
+      .mockImplementation(async (key: string, value: Parameters<KVNamespace['put']>[1]) => {
+        if (key === 'state' && typeof value === 'string') {
+          const parsed = JSON.parse(value) as {
+            disabledWorkerScripts?: string[];
+            blockedPagesProjects?: { project: string }[];
+          };
+          if (parsed.disabledWorkerScripts?.length || parsed.blockedPagesProjects?.length) {
+            events.push('record:targets');
+          } else {
+            events.push('record:waf');
+          }
+        }
+        return originalPut(key, value);
+      });
+
+    try {
+      await writeActive(env);
+      events.length = 0;
+      await runScheduled(env, {
+        ...LOW_CFG,
+        scope: 'none',
+        blocking: { ...LOW_CFG.blocking, workers: ['victim'], pages: ['victim-pages'] },
+      });
+    } finally {
+      putSpy.mockRestore();
+    }
+
+    const firstRecord = events.indexOf('record:targets');
+    const firstMutation = events.findIndex((e) => e.startsWith('mutate:'));
+    expect(firstRecord).toBeGreaterThanOrEqual(0);
+    expect(firstMutation).toBeGreaterThanOrEqual(0);
+    expect(firstRecord).toBeLessThan(firstMutation);
+
+    const state = await readState(env);
+    expect(state.disabledWorkerScripts).toEqual(['victim']);
+    expect(state.blockedPagesProjects).toEqual([
+      { project: 'victim-pages', previousDeploymentId: 'prev-1' },
+    ]);
+    await writeActive(env);
+  });
+
+  it('keeps a target recorded even when blocking it fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('graphql')) {
+        return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
+      }
+      if (url.includes('/subdomain')) {
+        // The disable fails, but the script may still have been disabled before
+        // the response was lost — dropping it from state would leave it dark.
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 1, message: 'boom' }] }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
+    }));
+
+    await writeActive(env);
+    await runScheduled(env, {
+      ...LOW_CFG,
+      scope: 'none',
+      blocking: { ...LOW_CFG.blocking, workers: ['stubborn'], pages: [] },
+    });
+
+    const state = await readState(env);
+    expect(state.status).toBe('killed');
+    expect(state.disabledWorkerScripts).toEqual(['stubborn']);
+    await writeActive(env);
+  });
+
+  it('still kills via workers/pages when the WAF deploy fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('graphql')) {
+        return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
+      }
+      if (url.includes('rulesets')) {
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }), { status: 403 });
+      }
+      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
+    }));
+
+    await writeActive(env);
+    await runScheduled(env, {
+      ...LOW_CFG,
+      scope: 'zone',
+      blocking: { ...LOW_CFG.blocking, workers: ['victim'], pages: [] },
+    });
+
+    const state = await readState(env);
+    expect(state.status).toBe('killed');
+    expect(state.wafRuleId).toBeUndefined();
+    // The independent mitigation must not be skipped just because WAF failed.
+    expect(state.disabledWorkerScripts).toEqual(['victim']);
+    await writeActive(env);
+  });
+});

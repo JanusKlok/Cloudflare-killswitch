@@ -44,7 +44,15 @@ export interface BlockedPage {
 
 /** Blocks each Pages project in cfg.blocking.pages by deploying a 503 maintenance Worker.
  *  Returns metadata needed to restore each project later.  Failures are logged and skipped. */
-export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[]> {
+export interface PageTarget extends BlockedPage {
+  productionBranch: string;
+}
+
+/** Resolves cfg.blocking.pages into concrete projects and reads the deployment
+ *  each must later be rolled back to, without changing anything.  Split from
+ *  blockPages so the caller can record these first: previousDeploymentId is
+ *  unrecoverable once the 503 bundle becomes the live deployment. */
+export async function resolvePageTargets(env: Env, cfg: AppConfig): Promise<PageTarget[]> {
   const pagesCfg = cfg.blocking.pages;
   const accountId = encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID);
   const token = env.CLOUDFLARE_API_TOKEN;
@@ -57,26 +65,20 @@ export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[
     );
     projectNames = projects.map((p) => p.name);
   } else {
-    projectNames = pagesCfg;
+    projectNames = [...pagesCfg];
   }
-
   if (projectNames.length === 0) return [];
 
-  const compatDate = cfg.blocking.pagesCompatibilityDate ?? DEFAULT_COMPAT_DATE;
-  const bundle = await buildKillBundle(compatDate);
-  const blocked: BlockedPage[] = [];
-
-  const results = await Promise.allSettled(
-    projectNames.map(async (project) => {
-      const projectPath = encodeURIComponent(project);
+  const discovered = await Promise.allSettled(
+    projectNames.map(async (project): Promise<PageTarget | undefined> => {
       const proj = await cfFetch<PagesProject>(
         token,
-        `/accounts/${accountId}/pages/projects/${projectPath}`,
+        `/accounts/${accountId}/pages/projects/${encodeURIComponent(project)}`,
       );
       const previousDeploymentId = proj.canonical_deployment?.id;
       if (!previousDeploymentId) {
         console.warn(`block-pages: ${project} has no production deployment — skipping`);
-        return;
+        return undefined;
       }
       // Pages treats a deployment as production only when its branch matches the
       // project's production branch — any other branch becomes a preview deployment
@@ -84,8 +86,45 @@ export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[
       const productionBranch = proj.production_branch;
       if (!productionBranch) {
         console.warn(`block-pages: ${project} has no production_branch — skipping`);
-        return;
+        return undefined;
       }
+      return { project, previousDeploymentId, productionBranch };
+    }),
+  );
+
+  const targets: PageTarget[] = [];
+  for (let i = 0; i < discovered.length; i++) {
+    const result = discovered[i];
+    if (result?.status === 'rejected') {
+      console.error(
+        `block-pages: could not inspect ${projectNames[i] ?? '(unknown)'}:`,
+        result.reason,
+      );
+    } else if (result?.status === 'fulfilled' && result.value) {
+      targets.push(result.value);
+    }
+  }
+  return targets;
+}
+
+/** Deploys the 503 maintenance Worker to each resolved target.
+ *  Returns the targets that were successfully blocked. */
+export async function blockPages(
+  env: Env,
+  cfg: AppConfig,
+  targets: PageTarget[],
+): Promise<BlockedPage[]> {
+  if (targets.length === 0) return [];
+
+  const accountId = encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID);
+  const token = env.CLOUDFLARE_API_TOKEN;
+  const compatDate = cfg.blocking.pagesCompatibilityDate ?? DEFAULT_COMPAT_DATE;
+  const bundle = await buildKillBundle(compatDate);
+  const blocked: BlockedPage[] = [];
+
+  const results = await Promise.allSettled(
+    targets.map(async ({ project, previousDeploymentId, productionBranch }) => {
+      const projectPath = encodeURIComponent(project);
 
       const form = new FormData();
       form.append('manifest', '{}');
@@ -107,7 +146,7 @@ export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result?.status === 'rejected') {
-      console.error(`block-pages: ${projectNames[i] ?? '(unknown)'} not blocked:`, result.reason);
+      console.error(`block-pages: ${targets[i]?.project ?? '(unknown)'} not blocked:`, result.reason);
     }
   }
 

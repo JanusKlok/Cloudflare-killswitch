@@ -3,8 +3,8 @@ import { readState, shouldAutoReset, writeKilled } from './state.js';
 import { restoreFromState } from './restore.js';
 import { MODULES } from './metrics/index.js';
 import { deployBlockRule } from './actions/waf.js';
-import { disableWorkers } from './actions/block-workers.js';
-import { blockPages, type BlockedPage } from './actions/block-pages.js';
+import { disableWorkers, resolveWorkerTargets } from './actions/block-workers.js';
+import { blockPages, resolvePageTargets, type BlockedPage } from './actions/block-pages.js';
 import { sendAlert } from './actions/email.js';
 import { purgeR2 } from './actions/purge-r2.js';
 import { purgeD1 } from './actions/purge-d1.js';
@@ -119,16 +119,46 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
     }
   }
 
-  // Record the kill immediately: if the Worker dies mid-kill, an unrecorded
-  // WAF rule would be orphaned (never removable via /restore) and the next
-  // tick would re-fire the whole kill — stacking rules and re-running purges.
-  // The final writeKilled below enriches this with the full action results.
+  // Record the WAF rule immediately: if the Worker dies here, an unrecorded
+  // rule would be orphaned (never removable via /restore) and the next tick
+  // would re-fire the whole kill — stacking rules and re-running purges.
   await writeKilled(env, { reason, killedAt, wafRuleId, wafRulesetId });
 
-  // Disable workers.dev subdomains and block Pages projects in parallel.
+  // Resolve what we are about to touch BEFORE touching it.  These are
+  // read-only calls, and recording their result first is what makes the kill
+  // recoverable: if the isolate dies mid-kill, scripts would already be
+  // disabled and Pages projects already serving 503 with nothing in state to
+  // undo them.  A Pages project's pre-kill deployment id in particular cannot
+  // be recovered once the 503 bundle is live.
+  const [workerTargets, pageTargets] = await Promise.all([
+    resolveWorkerTargets(env, cfg).catch((err: unknown) => {
+      console.error('resolve-worker-targets error:', err);
+      return [] as string[];
+    }),
+    resolvePageTargets(env, cfg).catch((err: unknown) => {
+      console.error('resolve-page-targets error:', err);
+      return [];
+    }),
+  ]);
+
+  // The intent, not the outcome: re-enabling a subdomain that was never
+  // disabled is a no-op, whereas omitting one that was leaves it dark forever.
+  await writeKilled(env, {
+    reason,
+    killedAt,
+    wafRuleId,
+    wafRulesetId,
+    disabledWorkerScripts: workerTargets,
+    blockedPagesProjects: pageTargets.map(({ project, previousDeploymentId }) => ({
+      project,
+      previousDeploymentId,
+    })),
+  });
+
+  // Now mutate.  Everything below is already recorded above.
   const [disabledWorkerScripts, blockedPagesProjects] = await Promise.all([
-    disableWorkers(env, cfg).catch((err: unknown) => { console.error('block-workers error:', err); return [] as string[]; }),
-    blockPages(env, cfg).catch((err: unknown) => { console.error('block-pages error:', err); return [] as BlockedPage[]; }),
+    disableWorkers(env, workerTargets).catch((err: unknown) => { console.error('block-workers error:', err); return [] as string[]; }),
+    blockPages(env, cfg, pageTargets).catch((err: unknown) => { console.error('block-pages error:', err); return [] as BlockedPage[]; }),
   ]);
 
   // Run purge actions, scoped to the breaching service: purging deletes data
@@ -180,6 +210,17 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
     emailLines.push('', `Pages blocked (${blockedPagesProjects.length}): ${blockedPagesProjects.map((b) => b.project).join(', ')}`);
   }
 
+  const unblockedWorkers = workerTargets.filter((n) => !disabledWorkerScripts.includes(n));
+  const unblockedPages = pageTargets
+    .map((t) => t.project)
+    .filter((p) => !blockedPagesProjects.some((b) => b.project === p));
+  if (unblockedWorkers.length > 0) {
+    emailLines.push('', `Workers that FAILED to block (${unblockedWorkers.length}): ${unblockedWorkers.join(', ')}`);
+  }
+  if (unblockedPages.length > 0) {
+    emailLines.push('', `Pages that FAILED to block (${unblockedPages.length}): ${unblockedPages.join(', ')}`);
+  }
+
   if (r2Results.length > 0) {
     emailLines.push('', 'R2 purge results:');
     for (const r of r2Results) {
@@ -218,13 +259,4 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
   } catch (err) {
     console.error('alert email failed:', err);
   }
-
-  await writeKilled(env, {
-    reason,
-    killedAt,
-    wafRuleId,
-    wafRulesetId,
-    disabledWorkerScripts,
-    blockedPagesProjects,
-  });
 }

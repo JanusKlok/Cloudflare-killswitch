@@ -35,6 +35,17 @@ export async function restoreFromState(
       })
     : Promise.resolve([]);
 
+  // Both ids are required to address the rule. A state holding one without the
+  // other cannot be acted on, so say so loudly instead of silently reporting a
+  // full restore while the rule stays live and blocks all traffic.
+  if (Boolean(state.wafRuleId) !== Boolean(state.wafRulesetId)) {
+    const detail = state.wafRuleId
+      ? `rule ${state.wafRuleId} has no recorded ruleset id`
+      : `ruleset ${state.wafRulesetId ?? '(unknown)'} has no recorded rule id`;
+    console.error(`restore: incomplete WAF reference — ${detail}; remove it in the dashboard`);
+    errors.push(`remove-waf-rule: incomplete reference (${detail})`);
+  }
+
   const wafPromise: Promise<boolean> =
     state.wafRuleId && state.wafRulesetId
       ? removeBlockRule(env, cfg, state.wafRuleId, state.wafRulesetId)
@@ -43,13 +54,16 @@ export async function restoreFromState(
             errors.push(`remove-waf-rule: ${String(err)}`);
             return false;
           })
-      : Promise.resolve(true);
+      : Promise.resolve(false);
 
-  const [failedPages, failedWorkers, wafRemoved] = await Promise.all([
+  const hadWafRule = Boolean(state.wafRuleId) || Boolean(state.wafRulesetId);
+  const [failedPages, failedWorkers, wafDeleted] = await Promise.all([
     pagesPromise,
     workersPromise,
     wafPromise,
   ]);
+  // Nothing recorded means nothing to undo, which is a success, not a failure.
+  const wafRemoved = hadWafRule ? wafDeleted : true;
 
   if (failedPages.length) {
     errors.push(`pages not restored: ${failedPages.map((p) => p.project).join(', ')}`);
