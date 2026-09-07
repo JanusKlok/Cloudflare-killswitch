@@ -6,15 +6,17 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.0.0",
+    "pnpm": ">=10.26.0"
   },
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "dev": "wrangler dev",
     "validate": "tsx scripts/validate-config.ts",
     "deploy": "tsx scripts/validate-config.ts && wrangler deploy",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "wrangler types && tsc --noEmit",
+    "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p tsconfig.scripts.json",
     "types": "wrangler types"
   },
   "devDependencies": {

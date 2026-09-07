@@ -6,6 +6,13 @@ const RATE_LIMIT_KEY = 'restore-attempts';
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_ATTEMPTS = 10;
 
+function jsonResponse(body: unknown, status: number, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...headers },
+  });
+}
+
 /** Constant-time string comparison.  Length leak is acceptable here: the secret
  *  length is fixed by the operator and not derived from any per-request input. */
 function timingSafeEqual(a: string, b: string): boolean {
@@ -17,32 +24,49 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
-/** Rolling-window rate limit on /restore.  Defense-in-depth — the 32-byte
- *  RECOVERY_SECRET is the primary brute-force defense.  KV reads are
- *  eventually consistent (~60 s), so this is a soft cap, not a hard one.
- *  Keyed per client IP: /restore is exempt from the WAF block, so a global
- *  budget would let an attacker spam requests and lock the real operator
- *  out of recovery during an incident. */
-async function checkAndRecordAttempt(env: Env, request: Request): Promise<boolean> {
+function rateLimitKey(request: Request): string {
   const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-  const key = `${RATE_LIMIT_KEY}:${ip}`;
-  const raw = await env.KILL_SWITCH_STATE.get(key);
-  const now = Date.now();
-  let attempts: number[] = [];
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) attempts = parsed.filter((n) => typeof n === 'number');
-    } catch {
-      // ignore malformed state — start fresh
-    }
+  return `${RATE_LIMIT_KEY}:${ip}`;
+}
+
+function parseAttempts(raw: string | null, now: number): number[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((n): n is number => typeof n === 'number' && now - n < RATE_WINDOW_MS);
+  } catch {
+    return []; // malformed state — start fresh
   }
-  attempts = attempts.filter((t) => now - t < RATE_WINDOW_MS);
-  if (attempts.length >= RATE_MAX_ATTEMPTS) return false;
+}
+
+/** Read-only check of the rolling per-IP window.
+ *
+ *  Split from recording deliberately.  This used to write to KV on *every*
+ *  request, including unauthenticated ones — and because the WAF rule exempts
+ *  /restore so it stays reachable during a kill, an attacker could spend the
+ *  free tier's 1,000 KV writes/day, which is a metric this very Worker monitors.
+ *  Unauthenticated traffic could therefore trigger the kill it is meant to
+ *  guard.  Writes now happen only after a failed authentication (below), so a
+ *  single IP can cost at most RATE_MAX_ATTEMPTS writes per window.
+ *
+ *  KV reads are eventually consistent (~60 s), so this is a soft cap. The
+ *  32-byte RECOVERY_SECRET remains the primary brute-force defense. Keyed per
+ *  client IP: a global budget would let an attacker lock the real operator out
+ *  of recovery during an incident. */
+async function isRateLimited(env: Env, request: Request): Promise<boolean> {
+  const raw = await env.KILL_SWITCH_STATE.get(rateLimitKey(request));
+  return parseAttempts(raw, Date.now()).length >= RATE_MAX_ATTEMPTS;
+}
+
+/** Records one failed authentication against the client's rolling window. */
+async function recordFailedAttempt(env: Env, request: Request): Promise<void> {
+  const key = rateLimitKey(request);
+  const now = Date.now();
+  const attempts = parseAttempts(await env.KILL_SWITCH_STATE.get(key), now);
   attempts.push(now);
   // TTL keeps per-IP keys from accumulating in KV (60 is the KV minimum).
   await env.KILL_SWITCH_STATE.put(key, JSON.stringify(attempts), { expirationTtl: 120 });
-  return true;
 }
 
 export async function handleFetch(
@@ -60,25 +84,17 @@ export async function handleFetch(
   // this guard the literal string "Bearer undefined" would authenticate.
   if (!env.RECOVERY_SECRET) {
     console.error('RECOVERY_SECRET is not set — refusing /restore');
-    return new Response(JSON.stringify({ error: 'Recovery secret not configured' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'Recovery secret not configured' }, 500);
   }
 
-  if (!(await checkAndRecordAttempt(env, request))) {
-    return new Response(JSON.stringify({ error: 'Too Many Requests' }), {
-      status: 429,
-      headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
-    });
+  if (await isRateLimited(env, request)) {
+    return jsonResponse({ error: 'Too Many Requests' }, 429, { 'Retry-After': '60' });
   }
 
   const auth = request.headers.get('Authorization') ?? '';
   if (!timingSafeEqual(auth, `Bearer ${env.RECOVERY_SECRET}`)) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-      status: 403,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    await recordFailedAttempt(env, request);
+    return jsonResponse({ error: 'Unauthorized' }, 403);
   }
 
   const state = await readState(env);
@@ -88,17 +104,11 @@ export async function handleFetch(
     const { fullyRestored, errors } = await restoreFromState(env, cfg, state);
     if (!fullyRestored) {
       console.error('partial restore failure:', errors.join('; '));
-      return new Response(JSON.stringify({ restored: false, previousReason, errors }), {
-        status: 502,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return jsonResponse({ restored: false, previousReason, errors }, 502);
     }
   } else {
     await writeActive(env);
   }
 
-  return new Response(JSON.stringify({ restored: true, previousReason }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  return jsonResponse({ restored: true, previousReason }, 200);
 }

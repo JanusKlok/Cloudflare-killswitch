@@ -1,0 +1,14 @@
+// scripts/ was excluded from every typecheck: validate-config.ts gates
+// `pnpm run deploy`, and tsx strips types without checking them, so a type
+// error there shipped silently into the deploy path.
+//
+// It needs its own config because it runs on Node rather than in the Workers
+// runtime. The Node surface it uses is declared in scripts/node-shims.d.ts
+// rather than pulled from @types/node — see the comment there.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["scripts/**/*", "src/**/*"]
+}

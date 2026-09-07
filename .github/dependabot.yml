@@ -19,6 +19,11 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # Actions get the same 7-day quarantine as npm packages: a compromised
+    # release is usually pulled within hours, and Actions run with access to
+    # the workflow token.
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
       - github-actions
