@@ -103,8 +103,20 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
   // there is no zone to protect — blocking.workers/pages is the whole kill.
   let wafRuleId: string | undefined;
   let wafRulesetId: string | undefined;
+  const wafErrors: string[] = [];
   if (cfg.scope !== 'none') {
-    ({ ruleId: wafRuleId, rulesetId: wafRulesetId } = await deployBlockRule(env, cfg));
+    try {
+      ({ ruleId: wafRuleId, rulesetId: wafRulesetId } = await deployBlockRule(
+        env,
+        cfg,
+        env.RECOVERY_HOSTNAME,
+      ));
+    } catch (err) {
+      // A WAF failure must not abort the kill: blocking.workers/pages are
+      // independent mitigations and previously never ran when this threw.
+      console.error('waf deploy error:', err);
+      wafErrors.push(`waf: ${String(err)}`);
+    }
   }
 
   // Record the kill immediately: if the Worker dies mid-kill, an unrecorded
@@ -184,6 +196,10 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
         emailLines.push(`  ${r.bindingName}.${t.table} [${t.action}]: ${status}`);
       }
     }
+  }
+
+  if (wafErrors.length > 0) {
+    emailLines.push('', 'WAF rule NOT deployed — traffic on the zone is still being served:', ...wafErrors.map((e) => `  ${e}`));
   }
 
   if (moduleErrors.length > 0) {

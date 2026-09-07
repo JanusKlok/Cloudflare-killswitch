@@ -150,6 +150,10 @@ export interface Env {
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_ZONE_ID: string;
   WORKER_SELF_NAME: string;
+  /** Optional — the hostname POST /restore is served on (e.g.
+   *  "killswitch.example.workers.dev").  When set, the WAF block rule exempts
+   *  /restore only on this host instead of zone-wide. */
+  RECOVERY_HOSTNAME?: string;
   // Optional — only present if [[send_email]] is configured in wrangler.toml
   SEND_EMAIL?: SendEmail;
   EMAIL_FROM?: string;

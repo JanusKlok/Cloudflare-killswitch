@@ -1,38 +1,15 @@
 import type { AppConfig, Env } from '../types.js';
-import { fetchRetry } from '../util/retry.js';
-
-const CF = 'https://api.cloudflare.com/client/v4';
+import { cfFetch } from '../util/cf-api.js';
 
 interface WorkerScript {
   id: string;
 }
 
-interface CfApiResult<T> {
-  result: T;
-  success: boolean;
-  errors: { code: number; message: string }[];
-}
-
-async function cfFetch<T>(env: Env, path: string, init?: RequestInit): Promise<T> {
-  const res = await fetchRetry(`${CF}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
-      ...(init?.headers as Record<string, string> | undefined),
-    },
-  });
-  const body = (await res.json()) as CfApiResult<T>;
-  if (!body.success) {
-    const msg = body.errors.map((e) => `${e.code}: ${e.message}`).join('; ');
-    throw new Error(`Cloudflare API error (${res.status}): ${msg}`);
-  }
-  return body.result;
-}
-
+/** Toggling a subdomain is idempotent (it sets a desired state rather than
+ *  creating anything), so retrying a transient failure here is safe. */
 async function setSubdomain(env: Env, scriptName: string, enabled: boolean): Promise<void> {
   await cfFetch<unknown>(
-    env,
+    env.CLOUDFLARE_API_TOKEN,
     `/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID)}/workers/scripts/${encodeURIComponent(scriptName)}/subdomain`,
     { method: 'POST', body: JSON.stringify({ enabled }) },
   );
@@ -52,7 +29,7 @@ export async function disableWorkers(env: Env, cfg: AppConfig): Promise<string[]
       );
     }
     const scripts = await cfFetch<WorkerScript[]>(
-      env,
+      env.CLOUDFLARE_API_TOKEN,
       `/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID)}/workers/scripts`,
     );
     scriptNames = scripts.map((s) => s.id).filter((name) => name !== env.WORKER_SELF_NAME);
@@ -67,6 +44,13 @@ export async function disableWorkers(env: Env, cfg: AppConfig): Promise<string[]
     }),
   );
 
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result?.status === 'rejected') {
+      console.error(`block-workers: ${scriptNames[i] ?? '(unknown)'} not disabled:`, result.reason);
+    }
+  }
+
   return results
     .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
     .map((r) => r.value);
@@ -77,5 +61,11 @@ export async function disableWorkers(env: Env, cfg: AppConfig): Promise<string[]
  *  them recorded for a retry instead of silently losing them. */
 export async function enableWorkers(env: Env, scriptNames: string[]): Promise<string[]> {
   const results = await Promise.allSettled(scriptNames.map((name) => setSubdomain(env, name, true)));
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result?.status === 'rejected') {
+      console.error(`enable-workers: ${scriptNames[i] ?? '(unknown)'} not re-enabled:`, result.reason);
+    }
+  }
   return scriptNames.filter((_, i) => results[i]?.status === 'rejected');
 }

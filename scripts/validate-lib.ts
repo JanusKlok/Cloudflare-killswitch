@@ -203,6 +203,11 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
     add('note', `Auto-reset is on — traffic is restored on the first tick on or after day ${cfg.billingCycleDay} of each UTC month`,
       'Verify that matches your Cloudflare billing renewal date, or the block lifts before the quota actually resets.');
   }
+  if (cfg.enableRecoveryWebhook && cfg.scope !== 'none' && isPlaceholder(w.vars['RECOVERY_HOSTNAME'])) {
+    add('warning', 'The recovery webhook is enabled but RECOVERY_HOSTNAME is not set',
+      'The WAF block rule then exempts POST /restore on every host in the zone, not just the kill switch — including your own origin app.',
+      'Fix: set RECOVERY_HOSTNAME in [vars] to the hostname /restore is served on (e.g. cloudflare-killswitch.<subdomain>.workers.dev).');
+  }
   if (cfg.enableRecoveryWebhook) {
     add('note', 'The recovery webhook is enabled — RECOVERY_SECRET must be set',
       'Set it with: pnpm exec wrangler secret put RECOVERY_SECRET',

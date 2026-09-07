@@ -1,7 +1,5 @@
 import type { AppConfig, Env } from '../types.js';
-import { fetchRetry } from '../util/retry.js';
-
-const CF = 'https://api.cloudflare.com/client/v4';
+import { cfFetch } from '../util/cf-api.js';
 
 // Minimal ESM Worker that returns 503 for every request.
 const KILL_WORKER_SRC = `export default {
@@ -15,12 +13,6 @@ const KILL_WORKER_SRC = `export default {
 
 const DEFAULT_COMPAT_DATE = '2025-01-01';
 
-interface CfApiResult<T> {
-  result: T;
-  success: boolean;
-  errors: { code: number; message: string }[];
-}
-
 interface PagesProject {
   canonical_deployment?: { id: string } | null;
   production_branch?: string;
@@ -28,23 +20,6 @@ interface PagesProject {
 
 interface PagesProjectListItem {
   name: string;
-}
-
-async function cfJson<T>(env: Env, path: string, init?: RequestInit): Promise<T> {
-  const res = await fetchRetry(`${CF}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
-      ...(init?.headers as Record<string, string> | undefined),
-    },
-  });
-  const body = (await res.json()) as CfApiResult<T>;
-  if (!body.success) {
-    const msg = body.errors.map((e) => `${e.code}: ${e.message}`).join('; ');
-    throw new Error(`Cloudflare API error (${res.status}): ${msg}`);
-  }
-  return body.result;
 }
 
 /** Build a _worker.bundle blob: a multipart body containing metadata + a 503 Worker module. */
@@ -72,11 +47,12 @@ export interface BlockedPage {
 export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[]> {
   const pagesCfg = cfg.blocking.pages;
   const accountId = encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID);
+  const token = env.CLOUDFLARE_API_TOKEN;
 
   let projectNames: string[];
   if (pagesCfg === 'all') {
-    const projects = await cfJson<PagesProjectListItem[]>(
-      env,
+    const projects = await cfFetch<PagesProjectListItem[]>(
+      token,
       `/accounts/${accountId}/pages/projects`,
     );
     projectNames = projects.map((p) => p.name);
@@ -90,11 +66,11 @@ export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[
   const bundle = await buildKillBundle(compatDate);
   const blocked: BlockedPage[] = [];
 
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     projectNames.map(async (project) => {
       const projectPath = encodeURIComponent(project);
-      const proj = await cfJson<PagesProject>(
-        env,
+      const proj = await cfFetch<PagesProject>(
+        token,
         `/accounts/${accountId}/pages/projects/${projectPath}`,
       );
       const previousDeploymentId = proj.canonical_deployment?.id;
@@ -117,20 +93,23 @@ export async function blockPages(env: Env, cfg: AppConfig): Promise<BlockedPage[
       form.append('branch', productionBranch);
       form.append('commit_message', 'Kill switch activated');
 
-      // NOTE: do not retry this request — Pages deployment creation is non-idempotent.
-      const deployRes = await fetch(
-        `${CF}/accounts/${accountId}/pages/projects/${projectPath}/deployments`,
-        { method: 'POST', headers: { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}` }, body: form },
-      );
-      const deployBody = (await deployRes.json()) as CfApiResult<unknown>;
-      if (!deployBody.success) {
-        const msg = deployBody.errors.map((e) => `${e.code}: ${e.message}`).join('; ');
-        throw new Error(`Pages deploy failed for ${project}: ${msg}`);
-      }
+      // retry off: creating a Pages deployment is non-idempotent.
+      await cfFetch<unknown>(token, `/accounts/${accountId}/pages/projects/${projectPath}/deployments`, {
+        method: 'POST',
+        retry: false,
+        body: form,
+      });
 
       blocked.push({ project, previousDeploymentId });
     }),
   );
+
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result?.status === 'rejected') {
+      console.error(`block-pages: ${projectNames[i] ?? '(unknown)'} not blocked:`, result.reason);
+    }
+  }
 
   return blocked;
 }
@@ -142,12 +121,18 @@ export async function restorePages(env: Env, blocked: BlockedPage[]): Promise<Bl
   const accountId = encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID);
   const results = await Promise.allSettled(
     blocked.map(({ project, previousDeploymentId }) =>
-      cfJson<unknown>(
-        env,
+      cfFetch<unknown>(
+        env.CLOUDFLARE_API_TOKEN,
         `/accounts/${accountId}/pages/projects/${encodeURIComponent(project)}/deployments/${encodeURIComponent(previousDeploymentId)}/rollback`,
         { method: 'POST' },
       ),
     ),
   );
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result?.status === 'rejected') {
+      console.error(`restore-pages: ${blocked[i]?.project ?? '(unknown)'} not rolled back:`, result.reason);
+    }
+  }
   return blocked.filter((_, i) => results[i]?.status === 'rejected');
 }

@@ -33,6 +33,13 @@ CLOUDFLARE_ZONE_ID = "REPLACE_ME_WITH_YOUR_ZONE_ID"
 # Must match the `name` field at the top of this file.
 WORKER_SELF_NAME = "cloudflare-killswitch"
 
+# OPTIONAL — the hostname POST /restore is served on, e.g.
+# "cloudflare-killswitch.<your-subdomain>.workers.dev".
+# When set, the WAF block rule exempts /restore only on this host.  Without it
+# the exemption matches POST /restore on every host in the zone, including your
+# own origin app.  Only relevant when enableRecoveryWebhook is true.
+# RECOVERY_HOSTNAME = "cloudflare-killswitch.example.workers.dev"
+
 # ---------------------------------------------------------------------------
 # Secrets — set with `wrangler secret put <NAME>` (never commit these values)
 # ---------------------------------------------------------------------------
