@@ -10,11 +10,7 @@ function sanitizeHeader(s: string): string {
  * Silently no-ops when SEND_EMAIL binding or EMAIL_FROM/TO vars are absent,
  * so email is fully optional.
  */
-export async function sendAlert(
-  env: Env,
-  subject: string,
-  body: string,
-): Promise<void> {
+export async function sendAlert(env: Env, subject: string, body: string): Promise<void> {
   if (!env.SEND_EMAIL || !env.EMAIL_FROM || !env.EMAIL_TO) return;
 
   const from = sanitizeHeader(env.EMAIL_FROM);

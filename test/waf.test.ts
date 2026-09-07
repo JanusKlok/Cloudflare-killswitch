@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { urlOf } from './helpers.js';
 import { env } from 'cloudflare:workers';
 import { deployBlockRule, removeBlockRule } from '../src/actions/waf.js';
 import { CONFIG } from '../src/config.js';
@@ -35,7 +36,10 @@ describe('deployBlockRule', () => {
     const mockFetch = vi.mocked(fetch);
     // First call: GET entrypoint → 404
     mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify({ success: false, errors: [{ code: 10005, message: 'not found' }] }), { status: 404 }),
+      new Response(
+        JSON.stringify({ success: false, errors: [{ code: 10005, message: 'not found' }] }),
+        { status: 404 },
+      ),
     );
     // Second call: PUT entrypoint → creates with rule
     mockFetch.mockResolvedValueOnce(
@@ -70,7 +74,9 @@ describe('deployBlockRule', () => {
   it('uses correct expression when webhook enabled', async () => {
     const mockFetch = vi.mocked(fetch);
     mockFetch.mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify(makeRulesetResponse('rs-3', 'rule-3')), { status: 200 })),
+      Promise.resolve(
+        new Response(JSON.stringify(makeRulesetResponse('rs-3', 'rule-3')), { status: 200 }),
+      ),
     );
     await deployBlockRule(env, testCfg);
 
@@ -82,7 +88,9 @@ describe('deployBlockRule', () => {
     const cfg: AppConfig = { ...testCfg, enableRecoveryWebhook: false };
     const mockFetch = vi.mocked(fetch);
     mockFetch.mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify(makeRulesetResponse('rs-4', 'rule-4')), { status: 200 })),
+      Promise.resolve(
+        new Response(JSON.stringify(makeRulesetResponse('rs-4', 'rule-4')), { status: 200 }),
+      ),
     );
     await deployBlockRule(env, cfg);
 
@@ -125,7 +133,11 @@ describe('deployBlockRule — destructive-fallback guard', () => {
    *  run on a definite 404. Each case below would previously have wiped every
    *  custom rule the operator had. */
   const nonNotFound = [
-    ['403 bad token', 403, { success: false, errors: [{ code: 10000, message: 'Authentication error' }] }],
+    [
+      '403 bad token',
+      403,
+      { success: false, errors: [{ code: 10000, message: 'Authentication error' }] },
+    ],
     ['429 rate limited', 429, { success: false, errors: [{ code: 971, message: 'rate limited' }] }],
     ['200 with success:false', 200, { success: false, errors: [{ code: 1, message: 'nope' }] }],
   ] as const;
@@ -136,9 +148,7 @@ describe('deployBlockRule — destructive-fallback guard', () => {
 
     await expect(deployBlockRule(env, testCfg)).rejects.toThrow();
 
-    const puts = mockFetch.mock.calls.filter(
-      ([, init]) => (init as RequestInit | undefined)?.method === 'PUT',
-    );
+    const puts = mockFetch.mock.calls.filter(([, init]) => init?.method === 'PUT');
     expect(puts).toHaveLength(0);
   });
 
@@ -154,9 +164,7 @@ describe('deployBlockRule — destructive-fallback guard', () => {
     );
 
     await expect(deployBlockRule(env, testCfg)).rejects.toThrow(/non-JSON 502/);
-    const puts = mockFetch.mock.calls.filter(
-      ([, init]) => (init as RequestInit | undefined)?.method === 'PUT',
-    );
+    const puts = mockFetch.mock.calls.filter(([, init]) => init?.method === 'PUT');
     expect(puts).toHaveLength(0);
   });
 
@@ -182,10 +190,6 @@ describe('deployBlockRule — rule creation is not retried', () => {
   beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
   afterEach(() => vi.unstubAllGlobals());
 
-  function urlOf(input: RequestInfo | URL): string {
-    return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-  }
-
   it('does not POST /rules twice on a 502 — a second rule would be orphaned', async () => {
     const mockFetch = vi.mocked(fetch);
     mockFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -198,7 +202,11 @@ describe('deployBlockRule — rule creation is not retried', () => {
       if (init?.method === 'POST') return new Response('<html>bad gateway</html>', { status: 502 });
       // Reconciliation lookup: no rule of ours present.
       return new Response(
-        JSON.stringify({ success: true, errors: [], result: { id: 'rs-1', phase: 'x', rules: [] } }),
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result: { id: 'rs-1', phase: 'x', rules: [] },
+        }),
         { status: 200 },
       );
     });
@@ -206,8 +214,7 @@ describe('deployBlockRule — rule creation is not retried', () => {
     await expect(deployBlockRule(env, testCfg)).rejects.toThrow();
 
     const creates = mockFetch.mock.calls.filter(
-      ([input, init]) =>
-        (init as RequestInit | undefined)?.method === 'POST' && urlOf(input).endsWith('/rules'),
+      ([input, init]) => init?.method === 'POST' && urlOf(input).endsWith('/rules'),
     );
     expect(creates).toHaveLength(1);
   });
@@ -251,7 +258,10 @@ describe('removeBlockRule — error classification', () => {
   it('rethrows a real failure instead of reporting the block lifted', async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(
-        JSON.stringify({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }),
+        JSON.stringify({
+          success: false,
+          errors: [{ code: 10000, message: 'Authentication error' }],
+        }),
         { status: 403 },
       ),
     );

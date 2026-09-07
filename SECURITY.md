@@ -42,10 +42,34 @@ Out of scope:
 
 For context — these are deliberate design choices the project already makes:
 
-- 7-day supply-chain quarantine on dependencies (`minimum-release-age=10080`)
+- 7-day supply-chain quarantine on dependencies (`minimum-release-age=10080`),
+  with the pnpm version pinned via `packageManager` and a CI step that asserts
+  each `.npmrc` setting is actually in effect (older pnpm ignores them silently)
 - npm lifecycle scripts disabled by default (`ignore-scripts=true`)
 - Exact version pinning, no caret/tilde ranges (`save-exact=true`)
+- Non-registry transitive sources blocked (`block-exotic-subdeps=true`) and
+  provenance downgrades refused (`trust-policy=no-downgrade`)
+- GitHub Actions pinned to full commit SHAs, not mutable tags
 - Constant-time comparison on the recovery secret
-- Soft rate limit on `POST /restore` (10 requests / minute)
+- Soft rate limit on `POST /restore` (10 **failed** authentications per minute
+  per client IP). Recorded only after a failed auth, so unauthenticated traffic
+  cannot spend the account's KV write quota — which is itself a monitored metric
 - The kill-switch worker excludes itself from `blocking.workers: 'all'` mode
-- WAF rule expression exempts `POST /restore` so the recovery path stays reachable
+- WAF rule expression exempts `POST /restore` so the recovery path stays
+  reachable, scoped to `RECOVERY_HOSTNAME` when set
+
+### Known limitations
+
+These are documented rather than fixed, and are in scope for reports that
+demonstrate concrete impact:
+
+- The `/restore` rate limit is a soft cap. KV reads are eventually consistent
+  (~60 s), and an attacker rotating source IPs gets a fresh window per IP. The
+  32-byte `RECOVERY_SECRET` is the primary brute-force defense.
+- `blocking.workers` disables the `workers.dev` subdomain only. A Worker served
+  on a custom domain or route keeps serving unless a WAF rule covers its zone
+  (`scope: 'zone'` / `'account'`).
+- On the Workers Free plan an invocation is capped at 50 subrequests. A kill
+  with `workers: 'all'` and `pages: 'all'` on an account with many scripts and
+  projects can exhaust that budget mid-kill; the failures are logged and
+  reported in the alert email. Prefer explicit lists past roughly 30 combined.

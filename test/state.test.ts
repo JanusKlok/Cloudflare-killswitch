@@ -132,7 +132,9 @@ describe('shouldAutoReset', () => {
 
   it('returns false when auto-reset is disabled', () => {
     at('2026-03-17T00:05:00Z');
-    expect(shouldAutoReset(killedOn('2026-02-20T00:00:00Z'), cfg({ autoResetOnBillingCycle: false }))).toBe(false);
+    expect(
+      shouldAutoReset(killedOn('2026-02-20T00:00:00Z'), cfg({ autoResetOnBillingCycle: false })),
+    ).toBe(false);
   });
 
   it('returns false when status is active', () => {
@@ -163,14 +165,22 @@ describe('shouldAutoReset', () => {
 
   it('honours day 1 as calendar-month behaviour', () => {
     at('2026-03-01T00:05:00Z');
-    expect(shouldAutoReset(killedOn('2026-02-14T00:00:00Z'), cfg({ billingCycleDay: 1 }))).toBe(true);
-    expect(shouldAutoReset(killedOn('2026-03-01T00:01:00Z'), cfg({ billingCycleDay: 1 }))).toBe(false);
+    expect(shouldAutoReset(killedOn('2026-02-14T00:00:00Z'), cfg({ billingCycleDay: 1 }))).toBe(
+      true,
+    );
+    expect(shouldAutoReset(killedOn('2026-03-01T00:01:00Z'), cfg({ billingCycleDay: 1 }))).toBe(
+      false,
+    );
   });
 
   it('refuses to reset on an invalid billingCycleDay rather than guessing', () => {
     at('2026-03-17T00:05:00Z');
-    expect(shouldAutoReset(killedOn('2026-01-01T00:00:00Z'), cfg({ billingCycleDay: 0 }))).toBe(false);
-    expect(shouldAutoReset(killedOn('2026-01-01T00:00:00Z'), cfg({ billingCycleDay: 32 }))).toBe(false);
+    expect(shouldAutoReset(killedOn('2026-01-01T00:00:00Z'), cfg({ billingCycleDay: 0 }))).toBe(
+      false,
+    );
+    expect(shouldAutoReset(killedOn('2026-01-01T00:00:00Z'), cfg({ billingCycleDay: 32 }))).toBe(
+      false,
+    );
   });
 
   it('fails open on an unparseable kill time — the next tick re-kills if still over', () => {

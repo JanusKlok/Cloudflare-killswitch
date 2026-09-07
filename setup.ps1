@@ -33,9 +33,10 @@ function Ask-YesNo {
 }
 
 function New-RandomHex {
+  # RandomNumberGenerator::Fill, not RNGCryptoServiceProvider: the latter is
+  # marked obsolete from .NET 6 (SYSLIB0023) and needs disposing.
   $bytes = [byte[]]::new(32)
-  $rng   = [Security.Cryptography.RNGCryptoServiceProvider]::new()
-  $rng.GetBytes($bytes)
+  [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
   return ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 

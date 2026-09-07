@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { urlOf } from './helpers.js';
 import { env } from 'cloudflare:workers';
-import { disableWorkers, enableWorkers, resolveWorkerTargets } from '../src/actions/block-workers.js';
+import {
+  disableWorkers,
+  enableWorkers,
+  resolveWorkerTargets,
+} from '../src/actions/block-workers.js';
 import { CONFIG } from '../src/config.js';
 import type { AppConfig } from '../src/types.js';
 
@@ -41,7 +46,10 @@ describe('disableWorkers — explicit list', () => {
 
   it('disables each named script and returns their names', async () => {
     vi.mocked(fetch).mockImplementation(okResp());
-    const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, workers: ['app-a', 'app-b'] } };
+    const cfg: AppConfig = {
+      ...BASE_CFG,
+      blocking: { ...BASE_CFG.blocking, workers: ['app-a', 'app-b'] },
+    };
     const result = await blockFromConfig(cfg);
     expect(result.sort()).toEqual(['app-a', 'app-b']);
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
@@ -56,9 +64,17 @@ describe('disableWorkers — explicit list', () => {
     vi.mocked(fetch)
       .mockImplementationOnce(okResp())
       .mockImplementationOnce(() =>
-        Promise.resolve(new Response(JSON.stringify({ success: false, errors: [{ code: 9999, message: 'fail' }] }), { status: 400 })),
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ success: false, errors: [{ code: 9999, message: 'fail' }] }),
+            { status: 400 },
+          ),
+        ),
       );
-    const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, workers: ['ok-script', 'fail-script'] } };
+    const cfg: AppConfig = {
+      ...BASE_CFG,
+      blocking: { ...BASE_CFG.blocking, workers: ['ok-script', 'fail-script'] },
+    };
     const result = await blockFromConfig(cfg);
     expect(result).toEqual(['ok-script']);
   });
@@ -72,7 +88,11 @@ describe('disableWorkers — all mode', () => {
     const selfName = env.WORKER_SELF_NAME;
     vi.mocked(fetch)
       .mockImplementationOnce(() =>
-        Promise.resolve(new Response(JSON.stringify(makeScriptList('user-app', selfName, 'another-app')), { status: 200 })),
+        Promise.resolve(
+          new Response(JSON.stringify(makeScriptList('user-app', selfName, 'another-app')), {
+            status: 200,
+          }),
+        ),
       )
       .mockImplementation(okResp());
 
@@ -116,7 +136,12 @@ describe('enableWorkers', () => {
 
   it('returns the names of scripts that failed to re-enable instead of throwing', async () => {
     vi.mocked(fetch).mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify({ success: false, errors: [{ code: 404, message: 'not found' }] }), { status: 404 })),
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ success: false, errors: [{ code: 404, message: 'not found' }] }),
+          { status: 404 },
+        ),
+      ),
     );
     await expect(enableWorkers(env, ['gone-script'])).resolves.toEqual(['gone-script']);
   });
@@ -141,7 +166,7 @@ describe('resolveWorkerTargets', () => {
 
     const subdomainCalls = vi
       .mocked(fetch)
-      .mock.calls.filter(([input]) => String(typeof input === 'string' ? input : (input as Request).url).includes('/subdomain'));
+      .mock.calls.filter(([input]) => urlOf(input).includes('/subdomain'));
     expect(subdomainCalls).toHaveLength(0);
   });
 });

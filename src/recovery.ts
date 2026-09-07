@@ -6,7 +6,11 @@ const RATE_LIMIT_KEY = 'restore-attempts';
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_ATTEMPTS = 10;
 
-function jsonResponse(body: unknown, status: number, headers: Record<string, string> = {}): Response {
+function jsonResponse(
+  body: unknown,
+  status: number,
+  headers: Record<string, string> = {},
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json', ...headers },
@@ -69,11 +73,7 @@ async function recordFailedAttempt(env: Env, request: Request): Promise<void> {
   await env.KILL_SWITCH_STATE.put(key, JSON.stringify(attempts), { expirationTtl: 120 });
 }
 
-export async function handleFetch(
-  request: Request,
-  env: Env,
-  cfg: AppConfig,
-): Promise<Response> {
+export async function handleFetch(request: Request, env: Env, cfg: AppConfig): Promise<Response> {
   if (!cfg.enableRecoveryWebhook) return new Response(null, { status: 404 });
   if (request.method !== 'POST' || new URL(request.url).pathname !== '/restore') {
     return new Response(null, { status: 404 });

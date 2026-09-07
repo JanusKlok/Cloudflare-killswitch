@@ -17,7 +17,10 @@ function makeProjectListResponse(...names: string[]) {
   return { success: true, errors: [], result: names.map((name) => ({ name })) };
 }
 
-function makeProjectResponse(deploymentId: string | null, productionBranch: string | null = 'main') {
+function makeProjectResponse(
+  deploymentId: string | null,
+  productionBranch: string | null = 'main',
+) {
   return {
     success: true,
     errors: [],
@@ -53,7 +56,9 @@ describe('blockPages — with projects', () => {
 
   it('saves the current deployment ID and deploys a kill bundle', async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(new Response(JSON.stringify(makeProjectResponse('prev-deploy-id')), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeProjectResponse('prev-deploy-id')), { status: 200 }),
+      )
       .mockResolvedValueOnce(new Response(JSON.stringify(makeDeployResponse()), { status: 200 }));
 
     const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['my-app'] } };
@@ -66,7 +71,9 @@ describe('blockPages — with projects', () => {
 
   it('uses POST to the deployments endpoint with _worker.bundle', async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(new Response(JSON.stringify(makeProjectResponse('d-1')), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeProjectResponse('d-1')), { status: 200 }),
+      )
       .mockResolvedValueOnce(new Response(JSON.stringify(makeDeployResponse()), { status: 200 }));
 
     const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['my-app'] } };
@@ -81,7 +88,9 @@ describe('blockPages — with projects', () => {
 
   it("deploys to the project's production branch (a preview branch would not block the live site)", async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(new Response(JSON.stringify(makeProjectResponse('d-1', 'release')), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeProjectResponse('d-1', 'release')), { status: 200 }),
+      )
       .mockResolvedValueOnce(new Response(JSON.stringify(makeDeployResponse()), { status: 200 }));
 
     const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['my-app'] } };
@@ -107,7 +116,10 @@ describe('blockPages — with projects', () => {
       new Response(JSON.stringify(makeProjectResponse(null)), { status: 200 }),
     );
 
-    const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['new-project'] } };
+    const cfg: AppConfig = {
+      ...BASE_CFG,
+      blocking: { ...BASE_CFG.blocking, pages: ['new-project'] },
+    };
     const result = await blockFromConfig(cfg);
     expect(result).toEqual([]);
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
@@ -118,14 +130,20 @@ describe('blockPages — with projects', () => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       if (init?.method === 'POST' && url.includes('/deployments')) {
         return url.includes('fail-app')
-          ? new Response(JSON.stringify({ success: false, errors: [{ code: 9999, message: 'fail' }] }), { status: 500 })
+          ? new Response(
+              JSON.stringify({ success: false, errors: [{ code: 9999, message: 'fail' }] }),
+              { status: 500 },
+            )
           : new Response(JSON.stringify(makeDeployResponse()), { status: 200 });
       }
       const id = url.includes('fail-app') ? 'd-fail' : 'd-ok';
       return new Response(JSON.stringify(makeProjectResponse(id)), { status: 200 });
     });
 
-    const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['ok-app', 'fail-app'] } };
+    const cfg: AppConfig = {
+      ...BASE_CFG,
+      blocking: { ...BASE_CFG.blocking, pages: ['ok-app', 'fail-app'] },
+    };
     const result = await blockFromConfig(cfg);
     expect(result).toHaveLength(1);
     expect(result[0]?.project).toBe('ok-app');
@@ -138,8 +156,12 @@ describe('blockPages — all mode', () => {
 
   it('lists projects via GET /pages/projects then blocks each one', async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(new Response(JSON.stringify(makeProjectListResponse('site-a')), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(makeProjectResponse('d-a')), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeProjectListResponse('site-a')), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeProjectResponse('d-a')), { status: 200 }),
+      )
       .mockResolvedValueOnce(new Response(JSON.stringify(makeDeployResponse()), { status: 200 }));
 
     const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: 'all' } };
@@ -168,10 +190,10 @@ describe('restorePages', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('calls POST /rollback for each blocked project', async () => {
-    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(makeRollbackResponse()), { status: 200 }));
-    await restorePages(env, [
-      { project: 'my-app', previousDeploymentId: 'prev-id' },
-    ]);
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify(makeRollbackResponse()), { status: 200 }),
+    );
+    await restorePages(env, [{ project: 'my-app', previousDeploymentId: 'prev-id' }]);
 
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(url).toContain('/pages/projects/my-app/deployments/prev-id/rollback');
@@ -180,7 +202,15 @@ describe('restorePages', () => {
 
   it('returns the entries that failed to roll back instead of throwing', async () => {
     vi.mocked(fetch).mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify({ success: false, errors: [{ code: 8000, message: 'no previous deploy' }] }), { status: 400 })),
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            success: false,
+            errors: [{ code: 8000, message: 'no previous deploy' }],
+          }),
+          { status: 400 },
+        ),
+      ),
     );
     await expect(
       restorePages(env, [{ project: 'my-app', previousDeploymentId: 'bad-id' }]),
@@ -210,9 +240,7 @@ describe('resolvePageTargets', () => {
     expect(targets).toEqual([
       { project: 'my-app', previousDeploymentId: 'prev-1', productionBranch: 'release' },
     ]);
-    const posts = vi
-      .mocked(fetch)
-      .mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
+    const posts = vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === 'POST');
     expect(posts).toHaveLength(0);
   });
 
@@ -220,12 +248,18 @@ describe('resolvePageTargets', () => {
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       if (url.includes('broken')) {
-        return new Response(JSON.stringify({ success: false, errors: [{ code: 9999, message: 'boom' }] }), { status: 500 });
+        return new Response(
+          JSON.stringify({ success: false, errors: [{ code: 9999, message: 'boom' }] }),
+          { status: 500 },
+        );
       }
       return new Response(JSON.stringify(makeProjectResponse('prev-ok')), { status: 200 });
     });
 
-    const cfg: AppConfig = { ...BASE_CFG, blocking: { ...BASE_CFG.blocking, pages: ['broken', 'fine'] } };
+    const cfg: AppConfig = {
+      ...BASE_CFG,
+      blocking: { ...BASE_CFG.blocking, pages: ['broken', 'fine'] },
+    };
     const targets = await resolvePageTargets(env, cfg);
     expect(targets.map((t) => t.project)).toEqual(['fine']);
   });

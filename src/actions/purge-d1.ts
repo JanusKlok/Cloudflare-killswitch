@@ -25,7 +25,9 @@ export async function purgeD1(env: Env, target: D1PurgeTarget): Promise<D1PurgeR
 
   for (const tbl of target.tables) {
     const sql =
-      tbl.action === 'DROP' ? `DROP TABLE IF EXISTS \`${tbl.name}\`` : `DELETE FROM \`${tbl.name}\``;
+      tbl.action === 'DROP'
+        ? `DROP TABLE IF EXISTS \`${tbl.name}\``
+        : `DELETE FROM \`${tbl.name}\``;
     try {
       await db.prepare(sql).run();
       result.tableResults.push({ table: tbl.name, action: tbl.action, success: true });

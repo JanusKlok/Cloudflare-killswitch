@@ -7,10 +7,4 @@ import { d1Module } from './d1.js';
 
 // To add a new service: create src/metrics/<name>.ts exporting a ServiceModule,
 // then append it here.  scheduled.ts does not need to change.
-export const MODULES: ServiceModule[] = [
-  workersModule,
-  pagesModule,
-  kvModule,
-  r2Module,
-  d1Module,
-];
+export const MODULES: ServiceModule[] = [workersModule, pagesModule, kvModule, r2Module, d1Module];

@@ -620,6 +620,19 @@ To restore: POST /restore with Authorization: Bearer <RECOVERY_SECRET>
 
 By default, the kill switch only deploys a WAF Custom Rule. Traffic on your custom Cloudflare-proxied domains is immediately blocked, but `workers.dev` and `pages.dev` subdomains are **not** affected by WAF rules.
 
+> **The reverse gap matters too.** `blocking.workers` disables a script's
+> `workers.dev` subdomain and nothing else — a Worker served on a **custom
+> domain or route keeps serving**. Those are covered by the WAF rule instead, so
+> the two mechanisms are complementary rather than redundant:
+>
+> | | `workers.dev` / `pages.dev` | Custom proxied domain |
+> |---|---|---|
+> | WAF rule (`scope: 'zone'` / `'account'`) | not covered | **blocked** |
+> | `blocking.workers` / `blocking.pages` | **blocked** | not covered |
+>
+> With `scope: 'none'` there is no WAF rule at all, so a Worker on a custom
+> domain is not blocked by anything. If you have a domain, use `scope: 'zone'`.
+
 Configure `blocking` in `src/config.ts` to also shut down those surfaces.
 
 ### Block workers.dev subdomains
@@ -666,7 +679,7 @@ blocking: {
 
 Workers and Pages blocking run in parallel and are both best-effort — a failure in one does not prevent the other from executing. The WAF rule always fires first regardless.
 
-**Free-plan subrequest limit:** on the Workers Free plan each invocation is capped at 50 subrequests, and every Cloudflare API call, KV operation, and R2 list/delete made during a kill counts against it. A kill with `workers: 'all'` and `pages: 'all'` on an account with many scripts and projects — especially combined with an R2/D1 purge — can exceed the cap, leaving some scripts or projects unblocked (their failures are logged and skipped). If you have more than roughly 30 scripts + projects combined, prefer explicit lists of the ones that matter, or run the kill switch on a paid plan (1,000 subrequests).
+**Free-plan subrequest limit:** on the Workers Free plan each invocation is capped at 50 subrequests, and every Cloudflare API call, KV operation, and R2 list/delete made during a kill counts against it. A kill with `workers: 'all'` and `pages: 'all'` on an account with many scripts and projects — especially combined with an R2/D1 purge — can exceed the cap, leaving some scripts or projects unblocked (their failures are logged and skipped). If you have more than roughly 30 scripts + projects combined, prefer explicit lists of the ones that matter, or run the kill switch on a paid plan (10,000 subrequests).
 
 ---
 

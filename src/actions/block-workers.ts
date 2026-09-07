@@ -62,11 +62,16 @@ export async function disableWorkers(env: Env, scriptNames: string[]): Promise<s
  *  Returns the names of scripts that FAILED to re-enable so callers can keep
  *  them recorded for a retry instead of silently losing them. */
 export async function enableWorkers(env: Env, scriptNames: string[]): Promise<string[]> {
-  const results = await Promise.allSettled(scriptNames.map((name) => setSubdomain(env, name, true)));
+  const results = await Promise.allSettled(
+    scriptNames.map((name) => setSubdomain(env, name, true)),
+  );
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result?.status === 'rejected') {
-      console.error(`enable-workers: ${scriptNames[i] ?? '(unknown)'} not re-enabled:`, result.reason);
+      console.error(
+        `enable-workers: ${scriptNames[i] ?? '(unknown)'} not re-enabled:`,
+        result.reason,
+      );
     }
   }
   return scriptNames.filter((_, i) => results[i]?.status === 'rejected');

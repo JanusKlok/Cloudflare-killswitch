@@ -83,18 +83,14 @@ export async function deployBlockRule(
   if (rulesetId === undefined) {
     // No entrypoint for this phase yet — create it carrying our rule. PUT with
     // a fixed body is idempotent, so a retry is safe here.
-    const created = await cfFetch<Ruleset>(
-      token,
-      `${base}/rulesets/phases/${PHASE}/entrypoint`,
-      {
-        method: 'PUT',
-        body: JSON.stringify({
-          name: 'Kill Switch Custom Rules',
-          description: 'Managed by cloudflare-killswitch',
-          rules: [blockRule(cfg, selfHostname)],
-        }),
-      },
-    );
+    const created = await cfFetch<Ruleset>(token, `${base}/rulesets/phases/${PHASE}/entrypoint`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: 'Kill Switch Custom Rules',
+        description: 'Managed by cloudflare-killswitch',
+        rules: [blockRule(cfg, selfHostname)],
+      }),
+    });
     const rule = created.rules?.[0];
     if (!rule) throw new Error('WAF rule creation returned no rule ID');
     return { ruleId: rule.id, rulesetId: created.id };
@@ -130,9 +126,13 @@ export async function removeBlockRule(
 ): Promise<void> {
   const base = scopeBase(env, cfg);
   try {
-    await cfFetch<unknown>(env.CLOUDFLARE_API_TOKEN, `${base}/rulesets/${rulesetId}/rules/${encodeURIComponent(ruleId)}`, {
-      method: 'DELETE',
-    });
+    await cfFetch<unknown>(
+      env.CLOUDFLARE_API_TOKEN,
+      `${base}/rulesets/${rulesetId}/rules/${encodeURIComponent(ruleId)}`,
+      {
+        method: 'DELETE',
+      },
+    );
   } catch (err) {
     // Already gone — the desired end state, so report success.  Matched on the
     // structured status/codes rather than a substring of the message, which

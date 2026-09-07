@@ -133,11 +133,15 @@ export async function blockPages(
       form.append('commit_message', 'Kill switch activated');
 
       // retry off: creating a Pages deployment is non-idempotent.
-      await cfFetch<unknown>(token, `/accounts/${accountId}/pages/projects/${projectPath}/deployments`, {
-        method: 'POST',
-        retry: false,
-        body: form,
-      });
+      await cfFetch<unknown>(
+        token,
+        `/accounts/${accountId}/pages/projects/${projectPath}/deployments`,
+        {
+          method: 'POST',
+          retry: false,
+          body: form,
+        },
+      );
 
       blocked.push({ project, previousDeploymentId });
     }),
@@ -146,7 +150,10 @@ export async function blockPages(
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result?.status === 'rejected') {
-      console.error(`block-pages: ${targets[i]?.project ?? '(unknown)'} not blocked:`, result.reason);
+      console.error(
+        `block-pages: ${targets[i]?.project ?? '(unknown)'} not blocked:`,
+        result.reason,
+      );
     }
   }
 
@@ -170,7 +177,10 @@ export async function restorePages(env: Env, blocked: BlockedPage[]): Promise<Bl
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result?.status === 'rejected') {
-      console.error(`restore-pages: ${blocked[i]?.project ?? '(unknown)'} not rolled back:`, result.reason);
+      console.error(
+        `restore-pages: ${blocked[i]?.project ?? '(unknown)'} not rolled back:`,
+        result.reason,
+      );
     }
   }
   return blocked.filter((_, i) => results[i]?.status === 'rejected');

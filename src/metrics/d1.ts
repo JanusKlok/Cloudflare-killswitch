@@ -59,7 +59,11 @@ export const d1Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcDaysAgo(STORAGE_WINDOW_DAYS), end: utcToday() },
+        {
+          accountTag: env.CLOUDFLARE_ACCOUNT_ID,
+          start: utcDaysAgo(STORAGE_WINDOW_DAYS),
+          end: utcToday(),
+        },
       ),
     ]);
 

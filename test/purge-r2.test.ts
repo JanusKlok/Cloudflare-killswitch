@@ -4,7 +4,25 @@ import { purgeR2 } from '../src/actions/purge-r2.js';
 import type { R2PurgeTarget } from '../src/types.js';
 
 function makeR2Object(key: string, uploaded: Date): R2Object {
-  return { key, uploaded, size: 100, etag: 'abc', httpEtag: '"abc"', checksums: { md5: undefined, sha1: undefined, sha256: undefined, sha512: undefined, toJSON: () => ({}) }, version: '1', storageClass: 'Standard', writeHttpMetadata: () => {}, httpMetadata: undefined, customMetadata: undefined } as unknown as R2Object;
+  return {
+    key,
+    uploaded,
+    size: 100,
+    etag: 'abc',
+    httpEtag: '"abc"',
+    checksums: {
+      md5: undefined,
+      sha1: undefined,
+      sha256: undefined,
+      sha512: undefined,
+      toJSON: () => ({}),
+    },
+    version: '1',
+    storageClass: 'Standard',
+    writeHttpMetadata: () => {},
+    httpMetadata: undefined,
+    customMetadata: undefined,
+  };
 }
 
 describe('purgeR2', () => {
@@ -52,7 +70,7 @@ describe('purgeR2', () => {
       deleteOrder: 'newest',
     };
 
-    const result = await purgeR2(envWithBucket as typeof env, target);
+    const result = await purgeR2(envWithBucket, target);
     expect(result.deleted).toBe(3);
     expect(result.errors).toHaveLength(0);
     // Newest first

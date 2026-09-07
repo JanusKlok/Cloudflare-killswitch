@@ -9,17 +9,35 @@ import { evaluateSample } from './evaluate.js';
 // Class B: read / metadata operations.
 // Source: https://developers.cloudflare.com/r2/pricing/
 const CLASS_A_OPS = new Set([
-  'PutObject', 'CopyObject', 'CompleteMultipartUpload', 'CreateMultipartUpload',
-  'UploadPart', 'UploadPartCopy', 'DeleteObject', 'DeleteObjects',
-  'AbortMultipartUpload', 'CreateBucket', 'DeleteBucket',
-  'PutBucketCors', 'DeleteBucketCors', 'PutBucketLifecycleConfiguration',
+  'PutObject',
+  'CopyObject',
+  'CompleteMultipartUpload',
+  'CreateMultipartUpload',
+  'UploadPart',
+  'UploadPartCopy',
+  'DeleteObject',
+  'DeleteObjects',
+  'AbortMultipartUpload',
+  'CreateBucket',
+  'DeleteBucket',
+  'PutBucketCors',
+  'DeleteBucketCors',
+  'PutBucketLifecycleConfiguration',
   'DeleteBucketLifecycleConfiguration',
 ]);
 
 const CLASS_B_OPS = new Set([
-  'GetObject', 'HeadObject', 'ListObjects', 'ListObjectsV2',
-  'HeadBucket', 'ListBuckets', 'ListMultipartUploads', 'ListParts',
-  'GetBucketCors', 'GetBucketLocation', 'GetBucketLifecycleConfiguration',
+  'GetObject',
+  'HeadObject',
+  'ListObjects',
+  'ListObjectsV2',
+  'HeadBucket',
+  'ListBuckets',
+  'ListMultipartUploads',
+  'ListParts',
+  'GetBucketCors',
+  'GetBucketLocation',
+  'GetBucketLifecycleConfiguration',
 ]);
 
 interface R2OpsData {
@@ -81,7 +99,11 @@ export const r2Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcHoursAgo(STORAGE_WINDOW_HOURS), end: utcNow() },
+        {
+          accountTag: env.CLOUDFLARE_ACCOUNT_ID,
+          start: utcHoursAgo(STORAGE_WINDOW_HOURS),
+          end: utcNow(),
+        },
       ),
     ]);
 
@@ -94,7 +116,10 @@ export const r2Module: ServiceModule = {
       else if (CLASS_B_OPS.has(t)) classBOps += row.sum.requests;
       // Cloudflare adds operations over time. Without this an unrecognised
       // name would be dropped from the billable total with no trace.
-      else console.warn(`r2: unclassified actionType "${t}" (${row.sum.requests} requests) counted in neither class`);
+      else
+        console.warn(
+          `r2: unclassified actionType "${t}" (${row.sum.requests} requests) counted in neither class`,
+        );
     }
 
     const storageRows = storageData.viewer.accounts[0]?.r2StorageAdaptiveGroups ?? [];

@@ -37,23 +37,53 @@ describe('sumPerEntityMax', () => {
 
   it('sums the per-entity maximum, not the grand max or the total', () => {
     // max-per-entity: a=40, b=25 -> 65. An ungrouped max would say 40.
-    const total = sumPerEntityMax('svc', 'f', rows, (r) => r.id, (r) => r.bytes, true);
+    const total = sumPerEntityMax(
+      'svc',
+      'f',
+      rows,
+      (r) => r.id,
+      (r) => r.bytes,
+      true,
+    );
     expect(total).toBe(65);
   });
 
   it('reports 0 for a service with no rows and no activity', () => {
-    expect(sumPerEntityMax('svc', 'f', [], () => '', () => 0, false)).toBe(0);
+    expect(
+      sumPerEntityMax(
+        'svc',
+        'f',
+        [],
+        () => '',
+        () => 0,
+        false,
+      ),
+    ).toBe(0);
   });
 
   it('throws rather than reporting 0 when the service saw activity', () => {
-    expect(() => sumPerEntityMax('svc', 'f', [], () => '', () => 0, true)).toThrow(
-      /rather than 0/,
-    );
+    expect(() =>
+      sumPerEntityMax(
+        'svc',
+        'f',
+        [],
+        () => '',
+        () => 0,
+        true,
+      ),
+    ).toThrow(/rather than 0/);
   });
 
   it('throws on a non-finite value instead of poisoning the total with NaN', () => {
     expect(() =>
-      sumPerEntityMax('svc', 'f', [{ id: 'a', bytes: NaN }], (r) => r.id, (r) => r.bytes, true),
+      sumPerEntityMax(
+        'svc',
+        'f',
+        [{ id: 'a', bytes: NaN }],
+        (r) => r.id,
+        (r) => r.bytes,
+        true,
+      ),
     ).toThrow(/finite/);
   });
 });
@@ -65,10 +95,7 @@ describe('workersModule.fetchUsage', () => {
   it('sums requests across rows', async () => {
     vi.mocked(fetch).mockImplementation(
       gqlReply({
-        workersInvocationsAdaptive: [
-          { sum: { requests: 1_200 } },
-          { sum: { requests: 800 } },
-        ],
+        workersInvocationsAdaptive: [{ sum: { requests: 1_200 } }, { sum: { requests: 800 } }],
       }),
     );
     const samples = await workersModule.fetchUsage(env, cfg);
@@ -189,9 +216,7 @@ describe('r2Module.fetchUsage', () => {
         r2OperationsAdaptiveGroups: [
           { sum: { requests: 42 }, dimensions: { actionType: 'SomeFutureOperation' } },
         ],
-        r2StorageAdaptiveGroups: [
-          { max: { payloadSize: 1 }, dimensions: { bucketName: 'b' } },
-        ],
+        r2StorageAdaptiveGroups: [{ max: { payloadSize: 1 }, dimensions: { bucketName: 'b' } }],
       }),
     );
 
@@ -263,7 +288,13 @@ describe('storage query windows', () => {
 
     const storageCall = vi
       .mocked(fetch)
-      .mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string) as { query: string; variables: { start: string } })
+      .mock.calls.map(
+        ([, init]) =>
+          JSON.parse((init as RequestInit).body as string) as {
+            query: string;
+            variables: { start: string };
+          },
+      )
       .find((b) => b.query.includes('kvStorageAdaptiveGroups'));
 
     expect(storageCall).toBeDefined();

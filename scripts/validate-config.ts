@@ -37,9 +37,11 @@ const errors = issues.filter((i) => i.level === 'error').length;
 const warnings = issues.filter((i) => i.level === 'warning').length;
 
 if (errors > 0) {
-  console.error(`Config check failed: ${errors} error(s), ${warnings} warning(s). Fix the errors above before deploying.`);
+  console.error(
+    `Config check failed: ${errors} error(s), ${warnings} warning(s). Fix the errors above before deploying.`,
+  );
   process.exit(1);
 }
-console.log(warnings > 0
-  ? `Config check passed with ${warnings} warning(s).`
-  : 'Config check passed.');
+console.log(
+  warnings > 0 ? `Config check passed with ${warnings} warning(s).` : 'Config check passed.',
+);

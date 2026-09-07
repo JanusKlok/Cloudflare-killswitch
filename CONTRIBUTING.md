@@ -21,10 +21,11 @@ This is also a security-sensitive tool — small bugs can mean a real outage doe
 
    ```
    pnpm typecheck
+   pnpm lint
    pnpm test
    ```
 
-   CI runs the same two commands and will block any PR that fails them.
+   CI runs the same commands and will block any PR that fails them. `pnpm format` applies the Prettier formatting `pnpm lint` checks for.
 
 4. **Try your change against a real Cloudflare account when feasible.** The miniflare-backed test suite catches most bugs but doesn't exercise live Cloudflare API behaviour. For non-trivial changes to `actions/`, deploy to a test account first.
 

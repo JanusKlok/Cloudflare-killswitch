@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { urlOf } from './helpers.js';
 import { env } from 'cloudflare:workers';
 import { runScheduled } from '../src/scheduled.js';
 import { readState, writeActive, writeKilled } from '../src/state.js';
@@ -14,9 +15,21 @@ const LOW_CFG: AppConfig = {
     ...CONFIG.limits,
     workers: { requests: { blockAt: 1 } },
     pages: { requests: { blockAt: 1_000_000 } },
-    kv: { reads: { blockAt: 1_000_000 }, writes: { blockAt: 1_000_000 }, storageBytes: { blockAt: 1_000_000_000_000 } },
-    r2: { storageBytes: { blockAt: 1_000_000_000_000 }, classAOps: { blockAt: 1_000_000_000 }, classBOps: { blockAt: 1_000_000_000 } },
-    d1: { rowReads: { blockAt: 1_000_000_000 }, rowWrites: { blockAt: 1_000_000_000 }, storageBytes: { blockAt: 1_000_000_000_000 } },
+    kv: {
+      reads: { blockAt: 1_000_000 },
+      writes: { blockAt: 1_000_000 },
+      storageBytes: { blockAt: 1_000_000_000_000 },
+    },
+    r2: {
+      storageBytes: { blockAt: 1_000_000_000_000 },
+      classAOps: { blockAt: 1_000_000_000 },
+      classBOps: { blockAt: 1_000_000_000 },
+    },
+    d1: {
+      rowReads: { blockAt: 1_000_000_000 },
+      rowWrites: { blockAt: 1_000_000_000 },
+      storageBytes: { blockAt: 1_000_000_000_000 },
+    },
   },
 };
 
@@ -67,17 +80,24 @@ function wafResponse(rulesetId: string, ruleId: string) {
 
 function routedMock(requests: number, rulesetId: string, ruleId: string) {
   return vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
-    const url =
-      typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (url.includes('graphql')) return new Response(JSON.stringify(mockGraphqlResponse(requests)), { status: 200 });
-    if (url.includes('rulesets/phases')) return new Response(JSON.stringify(wafResponse(rulesetId, 'rule-0')), { status: 200 });
-    if (url.includes('/rules')) return new Response(JSON.stringify({ success: true, errors: [], result: { id: ruleId } }), { status: 200 });
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes('graphql'))
+      return new Response(JSON.stringify(mockGraphqlResponse(requests)), { status: 200 });
+    if (url.includes('rulesets/phases'))
+      return new Response(JSON.stringify(wafResponse(rulesetId, 'rule-0')), { status: 200 });
+    if (url.includes('/rules'))
+      return new Response(JSON.stringify({ success: true, errors: [], result: { id: ruleId } }), {
+        status: 200,
+      });
     return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
   });
 }
 
 describe('runScheduled — no breach', () => {
-  beforeEach(async () => { await writeActive(env); vi.stubGlobal('fetch', vi.fn()); });
+  beforeEach(async () => {
+    await writeActive(env);
+    vi.stubGlobal('fetch', vi.fn());
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it('does not write killed state when all usage is zero', async () => {
@@ -88,7 +108,10 @@ describe('runScheduled — no breach', () => {
 });
 
 describe('runScheduled — block breach (no purge)', () => {
-  beforeEach(async () => { await writeActive(env); vi.stubGlobal('fetch', routedMock(100, 'rs-1', 'rule-new')); });
+  beforeEach(async () => {
+    await writeActive(env);
+    vi.stubGlobal('fetch', routedMock(100, 'rs-1', 'rule-new'));
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it('deploys WAF, writes killed state, does NOT purge', async () => {
@@ -102,7 +125,10 @@ describe('runScheduled — block breach (no purge)', () => {
 });
 
 describe('runScheduled — purge breach', () => {
-  beforeEach(async () => { await writeActive(env); vi.stubGlobal('fetch', routedMock(999, 'rs-2', 'rule-purge')); });
+  beforeEach(async () => {
+    await writeActive(env);
+    vi.stubGlobal('fetch', routedMock(999, 'rs-2', 'rule-purge'));
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it('deploys WAF and writes killed state with purge in reason (purgeConfig empty = no actual purge)', async () => {
@@ -114,7 +140,10 @@ describe('runScheduled — purge breach', () => {
 });
 
 describe('runScheduled — scope none (no zone on the account)', () => {
-  beforeEach(async () => { await writeActive(env); vi.stubGlobal('fetch', routedMock(100, 'rs-x', 'rule-x')); });
+  beforeEach(async () => {
+    await writeActive(env);
+    vi.stubGlobal('fetch', routedMock(100, 'rs-x', 'rule-x'));
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it('kills without any WAF call and still disables workers', async () => {
@@ -131,9 +160,7 @@ describe('runScheduled — scope none (no zone on the account)', () => {
     expect(state.wafRulesetId).toBeUndefined();
     expect(state.disabledWorkerScripts).toEqual(['victim-worker']);
 
-    const urls = vi.mocked(fetch).mock.calls.map(([input]) =>
-      typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url,
-    );
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => urlOf(input));
     expect(urls.some((u) => u.includes('rulesets'))).toBe(false);
   });
 });
@@ -162,31 +189,41 @@ describe('runScheduled — kill durability', () => {
   it('records its targets before it mutates anything', async () => {
     const events: string[] = [];
 
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes('graphql')) {
-        return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
-      }
-      if (url.includes('/subdomain')) {
-        events.push('mutate:subdomain');
-        return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
-      }
-      if (url.includes('/deployments') && init?.method === 'POST') {
-        events.push('mutate:pages-deploy');
-        return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
-      }
-      if (url.includes('/pages/projects/')) {
-        return new Response(
-          JSON.stringify({
-            success: true,
-            errors: [],
-            result: { canonical_deployment: { id: 'prev-1' }, production_branch: 'main' },
-          }),
-          { status: 200 },
-        );
-      }
-      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
-    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('graphql')) {
+          return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
+        }
+        if (url.includes('/subdomain')) {
+          events.push('mutate:subdomain');
+          return new Response(JSON.stringify({ success: true, errors: [], result: {} }), {
+            status: 200,
+          });
+        }
+        if (url.includes('/deployments') && init?.method === 'POST') {
+          events.push('mutate:pages-deploy');
+          return new Response(JSON.stringify({ success: true, errors: [], result: {} }), {
+            status: 200,
+          });
+        }
+        if (url.includes('/pages/projects/')) {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              errors: [],
+              result: { canonical_deployment: { id: 'prev-1' }, production_branch: 'main' },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ success: true, errors: [], result: {} }), {
+          status: 200,
+        });
+      }),
+    );
 
     const originalPut = env.KILL_SWITCH_STATE.put.bind(env.KILL_SWITCH_STATE);
     const putSpy = vi
@@ -233,18 +270,27 @@ describe('runScheduled — kill durability', () => {
   });
 
   it('keeps a target recorded even when blocking it fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes('graphql')) {
-        return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
-      }
-      if (url.includes('/subdomain')) {
-        // The disable fails, but the script may still have been disabled before
-        // the response was lost — dropping it from state would leave it dark.
-        return new Response(JSON.stringify({ success: false, errors: [{ code: 1, message: 'boom' }] }), { status: 500 });
-      }
-      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
-    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('graphql')) {
+          return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
+        }
+        if (url.includes('/subdomain')) {
+          // The disable fails, but the script may still have been disabled before
+          // the response was lost — dropping it from state would leave it dark.
+          return new Response(
+            JSON.stringify({ success: false, errors: [{ code: 1, message: 'boom' }] }),
+            { status: 500 },
+          );
+        }
+        return new Response(JSON.stringify({ success: true, errors: [], result: {} }), {
+          status: 200,
+        });
+      }),
+    );
 
     await writeActive(env);
     await runScheduled(env, {
@@ -260,16 +306,28 @@ describe('runScheduled — kill durability', () => {
   });
 
   it('still kills via workers/pages when the WAF deploy fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes('graphql')) {
-        return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
-      }
-      if (url.includes('rulesets')) {
-        return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }), { status: 403 });
-      }
-      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
-    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('graphql')) {
+          return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
+        }
+        if (url.includes('rulesets')) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              errors: [{ code: 10000, message: 'Authentication error' }],
+            }),
+            { status: 403 },
+          );
+        }
+        return new Response(JSON.stringify({ success: true, errors: [], result: {} }), {
+          status: 200,
+        });
+      }),
+    );
 
     await writeActive(env);
     await runScheduled(env, {

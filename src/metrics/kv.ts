@@ -63,7 +63,11 @@ export const kvModule: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcDaysAgo(STORAGE_WINDOW_DAYS), end: utcToday() },
+        {
+          accountTag: env.CLOUDFLARE_ACCOUNT_ID,
+          start: utcDaysAgo(STORAGE_WINDOW_DAYS),
+          end: utcToday(),
+        },
       ),
     ]);
 
@@ -77,7 +81,10 @@ export const kvModule: ServiceModule = {
       // into one counter here, so the effective `writes` limit is the sum of
       // all three. Deliberately conservative — it fires early, not late.
       else if (t === 'write' || t === 'delete' || t === 'list') writes += row.sum.requests;
-      else console.warn(`kv: unrecognised actionType "${t}" (${row.sum.requests} requests) not counted`);
+      else
+        console.warn(
+          `kv: unrecognised actionType "${t}" (${row.sum.requests} requests) not counted`,
+        );
     }
 
     const storageRows = storageData.viewer.accounts[0]?.kvStorageAdaptiveGroups ?? [];

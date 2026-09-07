@@ -18,9 +18,14 @@ function makeRequest(method: string, path: string, token?: string): Request {
 
 describe('handleFetch', () => {
   beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 }),
-    ));
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 }),
+        ),
+    );
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -48,7 +53,7 @@ describe('handleFetch', () => {
     await writeKilled(env, { reason: 'test', wafRuleId: 'r-1', wafRulesetId: 'rs-1' });
     const res = await handleFetch(makeRequest('POST', '/restore', SECRET), env, cfg);
     expect(res.status).toBe(200);
-    const body = await res.json() as { restored: boolean; previousReason: string };
+    const body = (await res.json()) as { restored: boolean; previousReason: string };
     expect(body.restored).toBe(true);
     expect(body.previousReason).toBe('test');
   });
@@ -56,7 +61,7 @@ describe('handleFetch', () => {
   it('is idempotent when already active', async () => {
     const res = await handleFetch(makeRequest('POST', '/restore', SECRET), env, cfg);
     expect(res.status).toBe(200);
-    const body = await res.json() as { restored: boolean };
+    const body = (await res.json()) as { restored: boolean };
     expect(body.restored).toBe(true);
   });
 
@@ -89,7 +94,9 @@ describe('handleFetch', () => {
     try {
       const res = await handleFetch(makeRequest('POST', '/restore', SECRET), env, cfg);
       expect(res.status).toBe(200);
-      const rateLimitWrites = putSpy.mock.calls.filter(([key]) => String(key).startsWith('restore-attempts'));
+      const rateLimitWrites = putSpy.mock.calls.filter(([key]) =>
+        key.startsWith('restore-attempts'),
+      );
       expect(rateLimitWrites).toHaveLength(0);
     } finally {
       putSpy.mockRestore();
@@ -161,14 +168,19 @@ describe('handleFetch', () => {
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       if (url.includes('/subdomain')) {
-        return new Response(JSON.stringify({ success: false, errors: [{ code: 9999, message: 'boom' }] }), { status: 500 });
+        return new Response(
+          JSON.stringify({ success: false, errors: [{ code: 9999, message: 'boom' }] }),
+          { status: 500 },
+        );
       }
-      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), { status: 200 });
+      return new Response(JSON.stringify({ success: true, errors: [], result: {} }), {
+        status: 200,
+      });
     });
 
     const res = await handleFetch(makeRequest('POST', '/restore', SECRET), env, cfg);
     expect(res.status).toBe(502);
-    const body = await res.json() as { restored: boolean; errors: string[] };
+    const body = (await res.json()) as { restored: boolean; errors: string[] };
     expect(body.restored).toBe(false);
     expect(body.errors.join(' ')).toContain('stuck-worker');
 

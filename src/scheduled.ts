@@ -11,10 +11,17 @@ import { purgeD1 } from './actions/purge-d1.js';
 import type { PurgeResult } from './actions/purge-r2.js';
 import type { D1PurgeResult } from './actions/purge-d1.js';
 
+// Binary units, because the configured limits are binary: Cloudflare's "1 GB"
+// KV allowance is 1_073_741_824 bytes. Dividing by 1e9 rendered that as
+// "1.07 GB", which reads like the limit had been exceeded.
+const KIB = 1024;
+const MIB = KIB * 1024;
+const GIB = MIB * 1024;
+
 function formatBytes(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(2)} MB`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(2)} KB`;
+  if (n >= GIB) return `${(n / GIB).toFixed(2)} GiB`;
+  if (n >= MIB) return `${(n / MIB).toFixed(2)} MiB`;
+  if (n >= KIB) return `${(n / KIB).toFixed(2)} KiB`;
   return `${n} B`;
 }
 
@@ -157,8 +164,14 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
 
   // Now mutate.  Everything below is already recorded above.
   const [disabledWorkerScripts, blockedPagesProjects] = await Promise.all([
-    disableWorkers(env, workerTargets).catch((err: unknown) => { console.error('block-workers error:', err); return [] as string[]; }),
-    blockPages(env, cfg, pageTargets).catch((err: unknown) => { console.error('block-pages error:', err); return [] as BlockedPage[]; }),
+    disableWorkers(env, workerTargets).catch((err: unknown) => {
+      console.error('block-workers error:', err);
+      return [] as string[];
+    }),
+    blockPages(env, cfg, pageTargets).catch((err: unknown) => {
+      console.error('block-pages error:', err);
+      return [] as BlockedPage[];
+    }),
   ]);
 
   // Run purge actions, scoped to the breaching service: purging deletes data
@@ -182,7 +195,10 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
       try {
         d1Results.push(await purgeD1(env, target));
       } catch (err) {
-        d1Results.push({ bindingName: target.bindingName, tableResults: [{ table: '(all)', action: 'purge', success: false, error: String(err) }] });
+        d1Results.push({
+          bindingName: target.bindingName,
+          tableResults: [{ table: '(all)', action: 'purge', success: false, error: String(err) }],
+        });
       }
     }
   }
@@ -204,10 +220,16 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
   }
 
   if (disabledWorkerScripts.length > 0) {
-    emailLines.push('', `Workers disabled (${disabledWorkerScripts.length}): ${disabledWorkerScripts.join(', ')}`);
+    emailLines.push(
+      '',
+      `Workers disabled (${disabledWorkerScripts.length}): ${disabledWorkerScripts.join(', ')}`,
+    );
   }
   if (blockedPagesProjects.length > 0) {
-    emailLines.push('', `Pages blocked (${blockedPagesProjects.length}): ${blockedPagesProjects.map((b) => b.project).join(', ')}`);
+    emailLines.push(
+      '',
+      `Pages blocked (${blockedPagesProjects.length}): ${blockedPagesProjects.map((b) => b.project).join(', ')}`,
+    );
   }
 
   const unblockedWorkers = workerTargets.filter((n) => !disabledWorkerScripts.includes(n));
@@ -215,10 +237,16 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
     .map((t) => t.project)
     .filter((p) => !blockedPagesProjects.some((b) => b.project === p));
   if (unblockedWorkers.length > 0) {
-    emailLines.push('', `Workers that FAILED to block (${unblockedWorkers.length}): ${unblockedWorkers.join(', ')}`);
+    emailLines.push(
+      '',
+      `Workers that FAILED to block (${unblockedWorkers.length}): ${unblockedWorkers.join(', ')}`,
+    );
   }
   if (unblockedPages.length > 0) {
-    emailLines.push('', `Pages that FAILED to block (${unblockedPages.length}): ${unblockedPages.join(', ')}`);
+    emailLines.push(
+      '',
+      `Pages that FAILED to block (${unblockedPages.length}): ${unblockedPages.join(', ')}`,
+    );
   }
 
   if (r2Results.length > 0) {
@@ -240,11 +268,19 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
   }
 
   if (wafErrors.length > 0) {
-    emailLines.push('', 'WAF rule NOT deployed — traffic on the zone is still being served:', ...wafErrors.map((e) => `  ${e}`));
+    emailLines.push(
+      '',
+      'WAF rule NOT deployed — traffic on the zone is still being served:',
+      ...wafErrors.map((e) => `  ${e}`),
+    );
   }
 
   if (moduleErrors.length > 0) {
-    emailLines.push('', 'Metric fetch errors (some services not checked):', ...moduleErrors.map((e) => `  ${e}`));
+    emailLines.push(
+      '',
+      'Metric fetch errors (some services not checked):',
+      ...moduleErrors.map((e) => `  ${e}`),
+    );
   }
 
   if (cfg.enableRecoveryWebhook) {
