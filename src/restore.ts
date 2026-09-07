@@ -1,5 +1,5 @@
 import type { AppConfig, Env, KvState } from './types.js';
-import { writeActive, writeKilled } from './state.js';
+import { killTimeOf, writeActive, writeKilled } from './state.js';
 import { removeBlockRule } from './actions/waf.js';
 import { enableWorkers } from './actions/block-workers.js';
 import { restorePages, type BlockedPage } from './actions/block-pages.js';
@@ -65,6 +65,10 @@ export async function restoreFromState(
 
   await writeKilled(env, {
     reason: `partial restore failure — retry restore (was: ${state.reason ?? 'unknown'})`,
+    // Keep the original kill time: restamping it would push the auto-reset
+    // anchor into the current billing period, so a failed reset on the
+    // anniversary would suppress every further attempt until the next one.
+    killedAt: killTimeOf(state),
     wafRuleId: wafRemoved ? undefined : state.wafRuleId,
     wafRulesetId: wafRemoved ? undefined : state.wafRulesetId,
     disabledWorkerScripts: failedWorkers,

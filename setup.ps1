@@ -198,10 +198,32 @@ if ($blockPagesChoice -eq 'list') {
   if ($pagesRaw) { $blockPagesList = $pagesRaw -split '\s*,\s*' | Where-Object { $_ } }
 }
 
-# ── Auto-reset ──────────────────────────────────────────────────────────────────
-Write-Section "Monthly auto-reset (optional)"
-Write-Host "  Automatically lifts the block on the 1st of each month,"
-Write-Host "  aligned with Cloudflare's billing reset.`n"
+# ── Billing cycle ─────────────────────────────────────────────────────────────
+Write-Section "Billing cycle"
+Write-Host "  Cloudflare bills from the day your account was created, not the 1st."
+Write-Host "  This day anchors the auto-reset below and the per-cycle usage windows"
+Write-Host "  (R2 operations, and the KV/R2/D1 storage ceilings)."
+Write-Host "  Find it at: dash.cloudflare.com -> Manage Account -> Billing"
+Write-Host "  Enter 1 for plain calendar months.`n"
+
+$billingDay = 0
+while ($billingDay -lt 1 -or $billingDay -gt 31) {
+  Write-Ask "Billing cycle start day (1-31) [1]"
+  $raw = Read-Value
+  if (-not $raw) { $raw = '1' }
+  if (-not [int]::TryParse($raw, [ref]$billingDay)) { $billingDay = 0 }
+  if ($billingDay -lt 1 -or $billingDay -gt 31) {
+    Write-Host "  Enter a whole number between 1 and 31." -ForegroundColor Yellow
+  }
+}
+if ($billingDay -gt 28) {
+  Write-Info "Months shorter than $billingDay use their last day instead."
+}
+
+# ── Auto-reset ────────────────────────────────────────────────────────────────
+Write-Section "Billing-cycle auto-reset (optional)"
+Write-Host "  Automatically lifts the block on the first check on or after day"
+Write-Host "  $billingDay of each month, once the quota that triggered it has reset.`n"
 $autoReset = Ask-YesNo "Enable auto-reset?" -Default $true
 
 # ── Apply ───────────────────────────────────────────────────────────────────────
@@ -233,8 +255,9 @@ $cfg = Get-Content src/config.ts -Raw
 # Regex anchors (not literal defaults) so the script also works on a config.ts
 # that was previously customised by hand or by an earlier setup run.
 $cfg = [regex]::Replace($cfg, "scope: '(?:zone|account|none)'", "scope: '$scope'")
-$cfg = [regex]::Replace($cfg, 'autoResetOnFirstOfMonth: (?:true|false)',
-                        "autoResetOnFirstOfMonth: $($autoReset.ToString().ToLower())")
+$cfg = [regex]::Replace($cfg, 'autoResetOnBillingCycle: (?:true|false)',
+                        "autoResetOnBillingCycle: $($autoReset.ToString().ToLower())")
+$cfg = [regex]::Replace($cfg, 'billingCycleDay: \d+', "billingCycleDay: $billingDay")
 $cfg = [regex]::Replace($cfg, 'enableRecoveryWebhook: (?:true|false)',
                         "enableRecoveryWebhook: $($enableWebhook.ToString().ToLower())")
 

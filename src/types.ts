@@ -6,10 +6,14 @@ export interface Threshold {
   purgeAt?: number;
 }
 
+/** 'day' = a UTC-day quota (resets 00:00 UTC).
+ *  'cycle' = a per-billing-period quota or ceiling (see src/billing.ts). */
+export type MetricWindow = 'day' | 'cycle';
+
 export interface MetricSample {
   metric: string;
   value: number;
-  window: 'day' | 'month';
+  window: MetricWindow;
 }
 
 export interface Breach {
@@ -18,7 +22,7 @@ export interface Breach {
   observed: number;
   limit: number;
   severity: Severity;
-  window: 'day' | 'month';
+  window: MetricWindow;
 }
 
 export interface ServiceModule {
@@ -29,7 +33,12 @@ export interface ServiceModule {
 
 export interface KvState {
   status: 'active' | 'killed';
+  /** When this state record was last written. */
   timestamp: string;
+  /** When the kill originally fired.  Preserved verbatim across partial-restore
+   *  rewrites so the billing-period comparison in shouldAutoReset keeps its
+   *  anchor.  Absent on states written before this field existed. */
+  killedAt?: string;
   reason?: string;
   wafRuleId?: string;
   wafRulesetId?: string;
@@ -106,7 +115,16 @@ export interface AppConfig {
    *  'none' = deploy no WAF rule — rely solely on blocking.workers/pages.
    *           For accounts with no zone (workers.dev / pages.dev only). */
   scope: 'zone' | 'account' | 'none';
-  autoResetOnFirstOfMonth: boolean;
+  /** Day of the UTC month your Cloudflare billing period starts — the day of
+   *  the month the account was created, not necessarily the 1st.  Must be an
+   *  integer 1-31; values past the end of a short month fall back to that
+   *  month's last day.  Anchors both the auto-reset and every per-cycle metric
+   *  window, so it is required even with autoResetOnBillingCycle off.
+   *  Set to 1 for plain calendar-month behaviour. */
+  billingCycleDay: number;
+  /** Automatically restore on the first tick of each new billing period.
+   *  Requires a valid billingCycleDay. */
+  autoResetOnBillingCycle: boolean;
   enableRecoveryWebhook: boolean;
   limits: {
     workers: WorkersLimits;

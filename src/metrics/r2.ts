@@ -1,6 +1,6 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { utcMonthStart, utcNow } from '../graphql/queries.js';
+import { cycleStart, utcNow } from '../graphql/queries.js';
 import { evaluateSample } from './evaluate.js';
 
 // R2 operation classification.
@@ -46,7 +46,7 @@ interface R2StorageData {
 export const r2Module: ServiceModule = {
   name: 'r2',
 
-  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
+  async fetchUsage(env: Env, cfg: AppConfig): Promise<MetricSample[]> {
     const [opsData, storageData] = await Promise.all([
       gql<R2OpsData>(
         env,
@@ -63,7 +63,7 @@ export const r2Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStart(), end: utcNow() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStart(cfg), end: utcNow() },
       ),
       gql<R2StorageData>(
         env,
@@ -80,7 +80,7 @@ export const r2Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStart(), end: utcNow() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStart(cfg), end: utcNow() },
       ),
     ]);
 
@@ -105,9 +105,9 @@ export const r2Module: ServiceModule = {
     for (const v of perBucketMax.values()) storageBytes += v;
 
     return [
-      { metric: 'storageBytes', value: storageBytes, window: 'month' },
-      { metric: 'classAOps', value: classAOps, window: 'month' },
-      { metric: 'classBOps', value: classBOps, window: 'month' },
+      { metric: 'storageBytes', value: storageBytes, window: 'cycle' },
+      { metric: 'classAOps', value: classAOps, window: 'cycle' },
+      { metric: 'classBOps', value: classBOps, window: 'cycle' },
     ];
   },
 

@@ -162,3 +162,38 @@ describe('validate — notes', () => {
     expect(notes).toContain('Cloudflare Pages: Edit');
   });
 });
+
+describe('validate — billingCycleDay', () => {
+  const notes = (issues: Issue[]) => issues.filter((i) => i.level === 'note').map((i) => i.title);
+
+  it('accepts a valid day without complaint', () => {
+    const issues = validate(cfgWith({ billingCycleDay: 17 }), parseWranglerToml(GOOD_TOML));
+    expect(errors(issues).join(' ')).not.toContain('billingCycleDay');
+  });
+
+  it.each([0, 32, -1, 1.5, NaN])('errors on out-of-range day %p', (day) => {
+    const issues = validate(cfgWith({ billingCycleDay: day }), parseWranglerToml(GOOD_TOML));
+    expect(errors(issues).join(' ')).toContain('billingCycleDay');
+  });
+
+  it('notes the short-month fallback for days past 28', () => {
+    const issues = validate(cfgWith({ billingCycleDay: 31 }), parseWranglerToml(GOOD_TOML));
+    expect(notes(issues).join(' ')).toContain('last day');
+  });
+
+  it('reminds the operator to check the reset day when auto-reset is on', () => {
+    const issues = validate(
+      cfgWith({ autoResetOnBillingCycle: true, billingCycleDay: 9 }),
+      parseWranglerToml(GOOD_TOML),
+    );
+    expect(notes(issues).join(' ')).toContain('day 9');
+  });
+
+  it('stays silent about reset timing when auto-reset is off', () => {
+    const issues = validate(
+      cfgWith({ autoResetOnBillingCycle: false, billingCycleDay: 9 }),
+      parseWranglerToml(GOOD_TOML),
+    );
+    expect(notes(issues).join(' ')).not.toContain('Auto-reset is on');
+  });
+});

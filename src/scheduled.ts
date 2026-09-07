@@ -23,11 +23,16 @@ function formatValue(metric: string, value: number): string {
   return value.toLocaleString('en-US');
 }
 
+const WINDOW_LABEL: Record<Breach['window'], string> = {
+  day: 'per day',
+  cycle: 'per billing cycle',
+};
+
 function breachSummary(breaches: Breach[]): string {
   return breaches
     .map(
       (b) =>
-        `  - ${b.service}.${b.metric} (${b.window}): ` +
+        `  - ${b.service}.${b.metric} (${WINDOW_LABEL[b.window]}): ` +
         `${formatValue(b.metric, b.observed)} observed, ` +
         `limit ${formatValue(b.metric, b.limit)} [${b.severity.toUpperCase()}]`,
     )
@@ -39,7 +44,7 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
   const state = await readState(env);
 
   if (state.status === 'killed') {
-    if (shouldAutoReset(state, cfg.autoResetOnFirstOfMonth)) {
+    if (shouldAutoReset(state, cfg)) {
       // Auto-reset on the 1st of the month.
       const { fullyRestored, errors } = await restoreFromState(env, cfg, state);
       if (!fullyRestored) {
@@ -90,6 +95,10 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
       ? `${purgeBreaches.length} purge breach(es), ${blockBreaches.length} block breach(es)`
       : `${blockBreaches.length} block breach(es)`;
 
+  // One kill time, reused by both writes below: the second write must not
+  // restamp it or the auto-reset anchor lands inside the current billing period.
+  const killedAt = new Date().toISOString();
+
   // Deploy WAF block rule first (bleeding stops first).  scope 'none' means
   // there is no zone to protect — blocking.workers/pages is the whole kill.
   let wafRuleId: string | undefined;
@@ -102,7 +111,7 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
   // WAF rule would be orphaned (never removable via /restore) and the next
   // tick would re-fire the whole kill — stacking rules and re-running purges.
   // The final writeKilled below enriches this with the full action results.
-  await writeKilled(env, { reason, wafRuleId, wafRulesetId });
+  await writeKilled(env, { reason, killedAt, wafRuleId, wafRulesetId });
 
   // Disable workers.dev subdomains and block Pages projects in parallel.
   const [disabledWorkerScripts, blockedPagesProjects] = await Promise.all([
@@ -196,6 +205,7 @@ export async function runScheduled(env: Env, cfg: AppConfig): Promise<void> {
 
   await writeKilled(env, {
     reason,
+    killedAt,
     wafRuleId,
     wafRulesetId,
     disabledWorkerScripts,

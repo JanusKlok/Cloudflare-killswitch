@@ -1,4 +1,9 @@
 import type { AppConfig, Threshold } from '../src/types.js';
+import {
+  MAX_BILLING_CYCLE_DAY,
+  MIN_BILLING_CYCLE_DAY,
+  isValidBillingCycleDay,
+} from '../src/billing.js';
 
 export type IssueLevel = 'error' | 'warning' | 'note';
 
@@ -92,6 +97,16 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
       'Fix: set WORKER_SELF_NAME in [vars] to exactly the `name` value at the top of wrangler.toml.');
   }
 
+  // --- billing cycle --------------------------------------------------------
+  if (!isValidBillingCycleDay(cfg.billingCycleDay)) {
+    add('error', `billingCycleDay (${String(cfg.billingCycleDay)}) must be an integer between ${MIN_BILLING_CYCLE_DAY} and ${MAX_BILLING_CYCLE_DAY}`,
+      'It anchors the auto-reset and every per-cycle metric window, so an invalid value skips auto-reset entirely and mis-measures R2 operations and the storage ceilings.',
+      'Fix: set billingCycleDay in src/config.ts to your billing renewal day (dashboard -> Manage Account -> Billing), or 1 for calendar months.');
+  } else if (cfg.billingCycleDay > 28) {
+    add('note', `billingCycleDay is ${cfg.billingCycleDay} — months shorter than that use their last day instead`,
+      'A cycle set to 31 opens on Feb 28 (or Feb 29 in a leap year). That is intended; no action needed.');
+  }
+
   // --- scope ----------------------------------------------------------------
   if (cfg.scope === 'zone' && isPlaceholder(w.vars['CLOUDFLARE_ZONE_ID'])) {
     add('error', "scope is 'zone' but CLOUDFLARE_ZONE_ID is empty or a placeholder",
@@ -183,6 +198,10 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
     add('note', 'CLOUDFLARE_API_TOKEN needs these permissions for this configuration:',
       ...perms.map((p) => `  - ${p}`),
       'The validator cannot inspect the token — verify at dash.cloudflare.com/profile/api-tokens.');
+  }
+  if (cfg.autoResetOnBillingCycle && isValidBillingCycleDay(cfg.billingCycleDay)) {
+    add('note', `Auto-reset is on — traffic is restored on the first tick on or after day ${cfg.billingCycleDay} of each UTC month`,
+      'Verify that matches your Cloudflare billing renewal date, or the block lifts before the quota actually resets.');
   }
   if (cfg.enableRecoveryWebhook) {
     add('note', 'The recovery webhook is enabled — RECOVERY_SECRET must be set',

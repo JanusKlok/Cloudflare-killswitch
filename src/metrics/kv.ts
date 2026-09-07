@@ -1,6 +1,6 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { utcDayStart, utcMonthStartDate, utcNow, utcToday } from '../graphql/queries.js';
+import { cycleStartDate, utcDayStart, utcNow, utcToday } from '../graphql/queries.js';
 import { evaluateSample } from './evaluate.js';
 
 interface KvOpsData {
@@ -28,7 +28,7 @@ interface KvStorageData {
 export const kvModule: ServiceModule = {
   name: 'kv',
 
-  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
+  async fetchUsage(env: Env, cfg: AppConfig): Promise<MetricSample[]> {
     const [opsData, storageData] = await Promise.all([
       gql<KvOpsData>(
         env,
@@ -62,7 +62,7 @@ export const kvModule: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStartDate(), end: utcToday() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStartDate(cfg), end: utcToday() },
       ),
     ]);
 
@@ -89,7 +89,7 @@ export const kvModule: ServiceModule = {
     return [
       { metric: 'reads', value: reads, window: 'day' },
       { metric: 'writes', value: writes, window: 'day' },
-      { metric: 'storageBytes', value: storageBytes, window: 'month' },
+      { metric: 'storageBytes', value: storageBytes, window: 'cycle' },
     ];
   },
 

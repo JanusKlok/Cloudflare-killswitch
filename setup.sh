@@ -179,10 +179,32 @@ if [ "$BLOCK_PAGES_CHOICE" = "list" ]; then
   read -r BLOCK_PAGES_LIST
 fi
 
-# ── Auto-reset ──────────────────────────────────────────────────────────────────
-section "Monthly auto-reset (optional)"
-printf "  Automatically lifts the block on the 1st of each month,\n"
-printf "  aligned with Cloudflare's billing reset.\n\n"
+# ── Billing cycle ─────────────────────────────────────────────────────────────
+section "Billing cycle"
+printf "  Cloudflare bills from the day your account was created, not the 1st.\n"
+printf "  This day anchors the auto-reset below and the per-cycle usage windows\n"
+printf "  (R2 operations, and the KV/R2/D1 storage ceilings).\n"
+printf "  Find it at: dash.cloudflare.com -> Manage Account -> Billing\n"
+printf "  Enter 1 for plain calendar months.\n\n"
+
+BILLING_DAY=""
+while :; do
+  ask "Billing cycle start day (1-31) [1]"
+  read -r BILLING_DAY; BILLING_DAY=${BILLING_DAY:-1}
+  case "$BILLING_DAY" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$BILLING_DAY" -ge 1 ] && [ "$BILLING_DAY" -le 31 ]; then break; fi ;;
+  esac
+  printf "${Y}  Enter a whole number between 1 and 31.${N}\n"
+done
+if [ "$BILLING_DAY" -gt 28 ]; then
+  info "Months shorter than $BILLING_DAY use their last day instead."
+fi
+
+# ── Auto-reset ────────────────────────────────────────────────────────────────
+section "Billing-cycle auto-reset (optional)"
+printf "  Automatically lifts the block on the first check on or after day\n"
+printf "  %s of each month, once the quota that triggered it has reset.\n\n" "$BILLING_DAY"
 
 AUTO_RESET=true
 yn "Enable auto-reset?" Y || AUTO_RESET=false
@@ -201,6 +223,7 @@ EMAIL_TO="$EMAIL_TO" \
 ENABLE_EMAIL="$ENABLE_EMAIL" \
 SCOPE="$SCOPE" \
 AUTO_RESET="$AUTO_RESET" \
+BILLING_DAY="$BILLING_DAY" \
 ENABLE_WEBHOOK="$ENABLE_WEBHOOK" \
 BLOCK_WORKERS_CHOICE="$BLOCK_WORKERS_CHOICE" \
 BLOCK_WORKERS_LIST="$BLOCK_WORKERS_LIST" \
@@ -217,6 +240,7 @@ email_to       = os.environ['EMAIL_TO']
 enable_email   = os.environ['ENABLE_EMAIL']   == 'true'
 scope          = os.environ['SCOPE']
 auto_reset     = os.environ['AUTO_RESET']     # 'true' | 'false'
+billing_day    = os.environ['BILLING_DAY']
 enable_webhook = os.environ['ENABLE_WEBHOOK'] # 'true' | 'false'
 
 # wrangler.toml
@@ -245,7 +269,8 @@ with open('src/config.ts') as f:
 # Regex anchors (not literal defaults) so the script also works on a config.ts
 # that was previously customised by hand or by an earlier setup run.
 c = re.sub(r"scope: '(?:zone|account|none)'",           f"scope: '{scope}'", c)
-c = re.sub(r'autoResetOnFirstOfMonth: (?:true|false)',  f'autoResetOnFirstOfMonth: {auto_reset}', c)
+c = re.sub(r'autoResetOnBillingCycle: (?:true|false)',   f'autoResetOnBillingCycle: {auto_reset}', c)
+c = re.sub(r'billingCycleDay: \d+',                     f'billingCycleDay: {billing_day}', c)
 c = re.sub(r'enableRecoveryWebhook: (?:true|false)',    f'enableRecoveryWebhook: {enable_webhook}', c)
 
 block_workers_choice = os.environ.get('BLOCK_WORKERS_CHOICE', 'none')

@@ -14,7 +14,7 @@ When a limit is hit, the worker:
 4. Sends an email alert with a full breach report (optional)
 5. Optionally purges R2 objects or D1 table data if storage crosses a higher, opt-in threshold
 6. Writes state to KV so subsequent cron ticks are instant no-ops
-7. Automatically re-arms itself on the 1st of the next UTC calendar month
+7. Automatically re-arms itself when your next Cloudflare billing period opens
 
 A recovery endpoint (`POST /restore`) lets you lift the block immediately without touching the Cloudflare dashboard.
 
@@ -248,7 +248,7 @@ Only edit this file if you want to:
 - Enable automatic data purge — add `purgeAt` to a storage metric (see [Optional: destructive purge](#optional-destructive-purge))
 - Protect all zones instead of one — change `scope` to `'account'` (requires an Enterprise plan)
 - No domain on the account at all — change `scope` to `'none'` and rely on `blocking.workers` / `blocking.pages`
-- Keep the block in place until you manually restore — set `autoResetOnFirstOfMonth: false`
+- Keep the block in place until you manually restore — set `autoResetOnBillingCycle: false`
 - Disable the recovery webhook entirely — set `enableRecoveryWebhook: false` (and skip `RECOVERY_SECRET` in step 5)
 
 See the [Configuration reference](#configuration-reference) for full details on every option.
@@ -306,7 +306,8 @@ All configuration lives in `src/config.ts`. The file is TypeScript — your edit
 ```ts
 export const CONFIG: AppConfig = {
   scope: 'zone',
-  autoResetOnFirstOfMonth: true,
+  billingCycleDay: 1,
+  autoResetOnBillingCycle: true,
   enableRecoveryWebhook: true,
   limits: { workers, pages, kv, r2, d1 },
   purgeConfig: { r2: [], d1: [] },
@@ -330,17 +331,59 @@ Controls which WAF the block rule is deployed to.
 
 Use `'zone'` unless you have an Enterprise plan and want to protect all zones simultaneously. Use `'none'` when your account has no domain/zone at all (everything runs on `workers.dev` / `pages.dev`) — a WAF rule has nothing to attach to there, so you **must** configure `blocking.workers` / `blocking.pages` or the kill switch takes no action.
 
-### autoResetOnFirstOfMonth
+### billingCycleDay
 
 ```ts
-autoResetOnFirstOfMonth: boolean  // default: true
+billingCycleDay: number  // 1-31, default: 1
 ```
 
-When `true`, the worker automatically removes the WAF block and resets to `active` on the **1st day of each UTC calendar month**, provided the kill event happened in a previous month.
+The day of the UTC month your Cloudflare billing period starts. Cloudflare bills
+from the day the account was created, **not** the 1st — find your renewal date
+under **Manage Account → Billing** in the dashboard.
 
-This aligns with Cloudflare's billing cycle — usage counters reset on the 1st, so the kill switch resets on the 1st too.
+This anchors two things, so it matters even with auto-reset switched off:
 
-Set to `false` if you want the block to remain indefinitely until you call `POST /restore` manually. Useful if you want to investigate a breach before re-enabling traffic.
+- **Auto-reset timing** — when `autoResetOnBillingCycle` is on
+- **Per-cycle metric windows** — R2 Class A/B operations, and the KV / R2 / D1
+  storage ceilings
+
+Getting it wrong mis-measures usage in both directions. With a cycle starting on
+the 17th and a naive calendar-month window, a check on 5 February would count
+only 1–5 February and miss everything from 17–31 January — the switch fires late,
+after the overage has already been billed.
+
+| Value | Behaviour |
+|-------|-----------|
+| `1` (default) | Plain calendar months — identical to the pre-`billingCycleDay` behaviour |
+| `2`–`28` | Cycle opens on that day every month |
+| `29`–`31` | Cycle opens on that day, falling back to the last day of shorter months (a `31` cycle opens on Feb 28, or Feb 29 in a leap year) |
+
+Values outside 1–31, or non-integers, are rejected by `pnpm run validate` and
+cause auto-reset to be skipped at runtime rather than guessed at.
+
+> **Not sure?** Cloudflare's *invoicing* period follows your signup date, but some
+> free-tier *quota* counters may still reset on the calendar month. If you cannot
+> confirm which applies to your account, leave this at `1`: a window that opens
+> earlier than the real quota reset over-counts, which makes the switch fire
+> early rather than late.
+
+### autoResetOnBillingCycle
+
+```ts
+autoResetOnBillingCycle: boolean  // default: true
+```
+
+When `true`, the worker automatically removes the WAF block and resets to
+`active` once the kill event falls in a **previous billing period** — that is, on
+the first cron tick on or after day `billingCycleDay` of the month.
+
+It is deliberately not gated on the anniversary day itself: if the Worker is down
+for the whole of that day, it still recovers on the next tick rather than waiting
+another full cycle.
+
+Set to `false` if you want the block to remain indefinitely until you call
+`POST /restore` manually. Useful if you want to investigate a breach before
+re-enabling traffic.
 
 ### enableRecoveryWebhook
 
@@ -399,7 +442,7 @@ kv: {
   writes:       { blockAt: 1_000 },         // write ops / day  (free tier: 1,000)
   storageBytes: { blockAt: 1_073_741_824 }, // storage in bytes (free tier: 1 GB)
   //   reads and writes: window = UTC calendar day
-  //   storageBytes:     window = UTC calendar month (max value seen this month)
+  //   storageBytes:     window = current billing cycle (see billingCycleDay)
 }
 ```
 
@@ -410,7 +453,7 @@ r2: {
   storageBytes: { blockAt: 10_737_418_240 }, // storage in bytes  (free tier: 10 GB / month)
   classAOps:    { blockAt: 1_000_000 },      // Class A ops / month (free tier: 1M)
   classBOps:    { blockAt: 10_000_000 },     // Class B ops / month (free tier: 10M)
-  //   All R2 metrics: window = UTC calendar month
+  //   All R2 metrics: window = current billing cycle (see billingCycleDay)
 }
 ```
 
@@ -424,7 +467,7 @@ d1: {
   rowWrites:    { blockAt: 100_000 },        // row writes / day  (free tier: 100,000)
   storageBytes: { blockAt: 5_368_709_120 },  // storage in bytes  (free tier: 5 GB / month)
   //   rowReads and rowWrites: window = UTC calendar day
-  //   storageBytes:           window = UTC calendar month
+  //   storageBytes:           window = current billing cycle (see billingCycleDay)
 }
 ```
 
@@ -508,7 +551,7 @@ On restore, each Pages project is rolled back to its pre-kill production deploym
 | D1 | row writes | Daily | 100,000 / day |
 | D1 | storage | Monthly | 5 GB |
 
-**Window alignment:** The worker uses the same time windows Cloudflare uses for billing. Daily metrics query from UTC midnight of the current day to now. Monthly metrics query from the 1st of the UTC calendar month at midnight to now.
+**Window alignment:** The worker uses the same time windows Cloudflare uses for billing. Daily metrics query from UTC midnight of the current day to now. Per-cycle metrics query from UTC midnight of the day the current billing period opened (see [`billingCycleDay`](#billingcycleday)) to now — with `billingCycleDay: 1` that is the 1st of the calendar month.
 
 **Analytics lag:** Cloudflare's GraphQL Analytics API has a pipeline delay of roughly 1–2 minutes. Usage values seen by the worker may be slightly behind real-time.
 
@@ -771,21 +814,26 @@ pnpm run deploy
 
 There are two ways to lift a kill-switch block:
 
-### Auto-reset (1st of the month)
+### Auto-reset (start of the billing cycle)
 
-With `autoResetOnFirstOfMonth: true` (the default), the worker automatically recovers on the **1st of each UTC calendar month**, provided:
+With `autoResetOnBillingCycle: true` (the default), the worker automatically
+recovers once a new billing period opens, provided:
 
 - The current KV state is `killed`
-- The kill event timestamp is from a previous month (not the current month)
+- `billingCycleDay` is a valid integer 1–31
+- The original kill time falls in a previous billing period
 
-On the first cron tick of the 1st:
+On the first cron tick on or after day `billingCycleDay`:
 1. Pages projects are rolled back to their pre-kill deployments (if any were blocked)
 2. Workers scripts have their `workers.dev` subdomain re-enabled (if any were disabled)
 3. The WAF rule is deleted via the Cloudflare API
 4. KV state is set to `active`
 5. Normal usage monitoring resumes
 
-This aligns with Cloudflare's billing reset — your limits refill on the 1st, so the worker unlocks on the 1st.
+This aligns with Cloudflare's billing reset — your limits refill when the new
+period opens, so the worker unlocks then too. The original kill time is preserved
+across failed restore attempts, so a partial failure retries on the next tick
+instead of suppressing auto-reset for the rest of the period.
 
 ### Manual restore via webhook
 

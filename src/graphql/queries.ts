@@ -1,3 +1,6 @@
+import type { AppConfig } from '../types.js';
+import { billingPeriodStart } from '../billing.js';
+
 function pad(n: number): string {
   return String(n).padStart(2, '0');
 }
@@ -20,12 +23,11 @@ export function utcNow(): string {
 }
 
 /**
- * UTC midnight of the first day of the current month — matches how Cloudflare
- * counts monthly free-tier quotas (resets on the 1st at 00:00 UTC).
+ * UTC midnight of the day the current billing period opened — Cloudflare's
+ * per-cycle quotas reset on the account's billing anniversary, not the 1st.
  */
-export function utcMonthStart(): string {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-01T00:00:00Z`;
+export function cycleStart(cfg: AppConfig): string {
+  return `${isoDate(billingPeriodStart(new Date(), cfg.billingCycleDay))}T00:00:00Z`;
 }
 
 // The two below are for `date_geq`/`date_leq` filters, which take a Date
@@ -36,8 +38,14 @@ export function utcToday(): string {
   return isoDate(new Date());
 }
 
-/** First day of the current UTC month. */
-export function utcMonthStartDate(): string {
+/** Calendar day the current billing period opened. */
+export function cycleStartDate(cfg: AppConfig): string {
+  return isoDate(billingPeriodStart(new Date(), cfg.billingCycleDay));
+}
+
+/** `days` calendar days before today, inclusive of today. */
+export function utcDaysAgo(days: number): string {
   const d = new Date();
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-01`;
+  d.setUTCDate(d.getUTCDate() - days);
+  return isoDate(d);
 }

@@ -1,0 +1,12 @@
+# Normalise text files in the repo to LF and let Git decide the working-tree form.
+* text=auto
+
+# Shell scripts must stay LF even when checked out on Windows: a CRLF shebang
+# line makes bash fail with "bad interpreter: /usr/bin/env bash^M".
+*.sh text eol=lf
+
+# PowerShell tolerates both, but keep it stable so diffs stay readable.
+*.ps1 text eol=crlf
+
+# Lockfiles are generated -- collapse them in diffs and reviews.
+pnpm-lock.yaml linguist-generated=true

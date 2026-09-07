@@ -1,6 +1,6 @@
 import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
 import { gql } from '../graphql/client.js';
-import { utcMonthStartDate, utcToday } from '../graphql/queries.js';
+import { cycleStartDate, utcToday } from '../graphql/queries.js';
 import { evaluateSample } from './evaluate.js';
 
 interface D1OpsData {
@@ -25,7 +25,7 @@ interface D1StorageData {
 export const d1Module: ServiceModule = {
   name: 'd1',
 
-  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
+  async fetchUsage(env: Env, cfg: AppConfig): Promise<MetricSample[]> {
     const [opsData, storageData] = await Promise.all([
       gql<D1OpsData>(
         env,
@@ -58,7 +58,7 @@ export const d1Module: ServiceModule = {
             }
           }
         }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcMonthStartDate(), end: utcToday() },
+        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStartDate(cfg), end: utcToday() },
       ),
     ]);
 
@@ -80,7 +80,7 @@ export const d1Module: ServiceModule = {
     return [
       { metric: 'rowReads', value: rowReads, window: 'day' },
       { metric: 'rowWrites', value: rowWrites, window: 'day' },
-      { metric: 'storageBytes', value: storageBytes, window: 'month' },
+      { metric: 'storageBytes', value: storageBytes, window: 'cycle' },
     ];
   },
 

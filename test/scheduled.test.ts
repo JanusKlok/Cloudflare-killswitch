@@ -146,7 +146,7 @@ describe('runScheduled — already killed', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await writeKilled(env, { reason: 'prior', wafRuleId: 'r', wafRulesetId: 'rs' });
-    await runScheduled(env, { ...LOW_CFG, autoResetOnFirstOfMonth: false });
+    await runScheduled(env, { ...LOW_CFG, autoResetOnBillingCycle: false });
 
     expect(fetchSpy).not.toHaveBeenCalled();
   });

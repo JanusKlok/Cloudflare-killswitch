@@ -6,12 +6,19 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Added
 
+- **`billingCycleDay` config option (1-31, default `1`).** Cloudflare invoices from the day the account was created, not the 1st, so "monthly" quotas do not reset on the 1st for most accounts. This day now anchors both the auto-reset and every per-cycle metric window (R2 Class A/B operations, and the KV/R2/D1 storage ceilings). Days 29-31 fall back to the last day of shorter months. `billingCycleDay: 1` reproduces the previous calendar-month behaviour exactly. Validated pre-deploy and prompted for by both setup scripts.
+- `.gitattributes` normalising text files to LF and pinning `*.sh` to `eol=lf`. Without it a Windows clone with `core.autocrlf=true` gets a CRLF shebang in `setup.sh`, which fails with `bad interpreter: /usr/bin/env bash^M`.
+- `test/setup-scripts.test.ts` runs each of the setup scripts' `config.ts` regex anchors against the real `src/config.ts`. The scripts rewrite that file by regex, so a renamed field previously made the substitution silently no-op and drop the operator's answers.
 - Pre-deploy config validation (`pnpm run validate`, run automatically by `pnpm run deploy` and the setup scripts). Cross-checks `src/config.ts` against `wrangler.toml` and reports concrete fixes: placeholder IDs, empty zone ID with `scope: 'zone'`, active `[[send_email]]` with placeholder address, `scope: 'none'` with no blocking configured, purge targets without matching bindings, `purgeAt` below `blockAt`, and the API-token permissions each configuration needs.
 - The setup scripts (`setup.ps1` / `setup.sh`) now offer `scope: 'none'` and rewrite `config.ts` with regex anchors, so re-running setup works on an already-customised config.
 - New `scope: 'none'` option: deploys no WAF rule and relies entirely on `blocking.workers` / `blocking.pages`. For accounts with no domain/zone (workers.dev / pages.dev only), where there is nothing for a WAF rule to attach to. Previously a failing WAF deploy (e.g. empty `CLOUDFLARE_ZONE_ID`) aborted the whole kill, so Workers/Pages were never disabled either.
 
 ### Changed
 
+- **BREAKING (config):** `autoResetOnFirstOfMonth` is renamed `autoResetOnBillingCycle` and now pairs with `billingCycleDay`. Rename the field in `src/config.ts`; `pnpm run validate` reports an invalid or missing `billingCycleDay`.
+- Auto-reset is no longer gated on the anniversary day itself. It now fires on the first tick where the kill predates the current billing period, so a Worker that was down for the whole of that day still recovers instead of waiting another full cycle.
+- Per-cycle metric windows are anchored to `billingCycleDay` instead of the 1st of the calendar month. With a cycle starting on the 17th, a check on 5 February previously counted only 1-5 February and missed 17-31 January, so the switch fired after the overage had already been billed.
+- `MetricSample.window` / `Breach.window` renamed their `'month'` variant to `'cycle'`, and alert emails now read `per billing cycle` rather than `(month)`.
 - Dev dependencies bumped to the newest versions clearing the 7-day quarantine: wrangler 4.105.0, @cloudflare/vitest-pool-workers 0.16.20, @cloudflare/workers-types 4.20260626.1, vitest 4.1.9; CI uses actions/checkout@v7.
 - The vitest pool now pins an explicit `compatibilityDate`. Without it the pool defaults to "today", which can exceed the newest date the installed workerd binary supports, failing every test with `ERR_RUNTIME_FAILURE`.
 
@@ -22,6 +29,7 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Fixed
 
+- **A failed auto-reset suppressed every further attempt for the rest of the period.** A partial restore rewrote the killed state with a fresh `timestamp`, which moved the auto-reset anchor into the current period — so a restore that failed on the reset day never retried, and with `enableRecoveryWebhook: false` (the shipped default) there was no manual path either. `KvState` now carries a separate `killedAt` that is preserved verbatim across rewrites, so a failed restore retries on the next tick. An unparseable kill time now fails *open* (restore, and let the next tick re-kill if usage is still over) rather than stranding the account.
 - **`src/config.ts` shipped the most destructive settings while every doc claimed the opposite.** The committed defaults were `scope: 'none'`, `blocking.workers: 'all'` and `blocking.pages: 'all'`, so a clone-and-deploy would, on the first breach, disable every Worker on the account and overwrite every Pages project's production deployment — while deploying no WAF rule at all. The README and `config.ts`'s own comments documented `scope: 'zone'` with both blocking lists empty. Restored to the documented safe defaults; a new `test/config-defaults.test.ts` pins them so a local `setup.sh` run can never leak an operator's own choices into a commit again.
 - Dependabot now uses a 7-day `cooldown`, matching the `.npmrc` `minimum-release-age` quarantine. Previously it proposed versions younger than 7 days, which pnpm refused to resolve, failing the updater job.
 

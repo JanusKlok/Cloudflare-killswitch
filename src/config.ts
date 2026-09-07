@@ -17,8 +17,19 @@ export const CONFIG: AppConfig = {
   //             blocking.pages below, or the kill switch will do nothing.
   scope: 'zone',
 
-  // Automatically restore on the 1st of each calendar month (UTC).
-  autoResetOnFirstOfMonth: true,
+  // The day of the UTC month your Cloudflare billing period starts.  Cloudflare
+  // bills from the day the account was created, not the 1st, so check
+  // dash.cloudflare.com -> Manage Account -> Billing for your renewal date.
+  // Anchors both the auto-reset and every per-cycle metric window (R2
+  // operations, and the KV/R2/D1 storage ceilings), so it matters even with
+  // autoResetOnBillingCycle off.
+  //   1     — plain calendar-month behaviour
+  //   29-31 — falls back to the last day of shorter months (Feb 28/29)
+  billingCycleDay: 1,
+
+  // Automatically restore on the first tick of each new billing period.
+  // Requires a valid billingCycleDay above.
+  autoResetOnBillingCycle: true,
 
   // Expose POST /restore so you can re-arm without touching the dashboard.
   enableRecoveryWebhook: false,
