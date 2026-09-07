@@ -444,7 +444,7 @@ Both arrays are **empty by default**. Purge is completely opt-in and only runs w
 ```ts
 blocking: {
   workers: 'all' | string[],  // default: []
-  pages:   string[],          // default: []
+  pages:   'all' | string[],  // default: []
 }
 ```
 

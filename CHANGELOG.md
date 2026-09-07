@@ -22,6 +22,7 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Fixed
 
+- **`src/config.ts` shipped the most destructive settings while every doc claimed the opposite.** The committed defaults were `scope: 'none'`, `blocking.workers: 'all'` and `blocking.pages: 'all'`, so a clone-and-deploy would, on the first breach, disable every Worker on the account and overwrite every Pages project's production deployment — while deploying no WAF rule at all. The README and `config.ts`'s own comments documented `scope: 'zone'` with both blocking lists empty. Restored to the documented safe defaults; a new `test/config-defaults.test.ts` pins them so a local `setup.sh` run can never leak an operator's own choices into a commit again.
 - Dependabot now uses a 7-day `cooldown`, matching the `.npmrc` `minimum-release-age` quarantine. Previously it proposed versions younger than 7 days, which pnpm refused to resolve, failing the updater job.
 
 - Account-wide storage metrics for KV, R2, and D1 now group by namespace/bucket/database and sum the per-entity maxima. Previously the ungrouped `max` reported only the single largest entity, undercounting accounts with more than one namespace/bucket/database.

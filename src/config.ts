@@ -15,7 +15,7 @@ export const CONFIG: AppConfig = {
   // 'none'    — deploys no WAF rule at all. For accounts with no domain/zone
   //             (workers.dev / pages.dev only) — set blocking.workers and
   //             blocking.pages below, or the kill switch will do nothing.
-  scope: 'none',
+  scope: 'zone',
 
   // Automatically restore on the 1st of each calendar month (UTC).
   autoResetOnFirstOfMonth: true,
@@ -71,7 +71,7 @@ export const CONFIG: AppConfig = {
     // string[]  → explicit list of script names to disable.
     // []        → do not touch any Workers scripts (default, safest).
     // -----------------------------------------------------------------------
-    workers: 'all',
+    workers: [] as string[],
 
     // -----------------------------------------------------------------------
     // pages — Pages projects to block on kill.
@@ -82,7 +82,7 @@ export const CONFIG: AppConfig = {
     // string[] → explicit list of project names.
     // []       → do not touch any Pages projects (default, safest).
     // -----------------------------------------------------------------------
-    pages: 'all',
+    pages: [] as string[],
   },
 
   purgeConfig: {
