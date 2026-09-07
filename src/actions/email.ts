@@ -27,10 +27,18 @@ export async function sendAlert(env: Env, subject: string, body: string): Promis
     body,
   ].join('\r\n');
 
-  const { readable, writable } = new TransformStream<Uint8Array>();
-  const writer = writable.getWriter();
-  await writer.write(new TextEncoder().encode(raw));
-  await writer.close();
+  // Built as a ReadableStream directly rather than by writing into a
+  // TransformStream: awaiting writer.close() there blocks until something
+  // reads the readable end, and the only reader is the SEND_EMAIL.send() call
+  // below — which cannot start until this function gets past the await. That
+  // deadlocked the alert for the full Worker time limit.
+  const bytes = new TextEncoder().encode(raw);
+  const readable = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
 
   // EmailMessage is a Workers runtime global (from @cloudflare/workers-types)
   const message = new EmailMessage(from, to, readable);

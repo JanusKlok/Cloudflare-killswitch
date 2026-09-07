@@ -32,6 +32,14 @@ function Ask-YesNo {
   return $ans -match '^[Yy]'
 }
 
+# A quote or backslash in an operator-supplied value (an email address, a
+# Pages project name) would otherwise produce a config.ts or wrangler.toml that
+# does not parse. JSON string syntax is a subset of both TypeScript's and TOML's
+# basic strings, so this is a correct escaper for both.
+function Quote-Str ($value) {
+  return ConvertTo-Json -InputObject ([string]$value) -Compress
+}
+
 function New-RandomHex {
   # RandomNumberGenerator::Fill, not RNGCryptoServiceProvider: the latter is
   # marked obsolete from .NET 6 (SYSLIB0023) and needs disposing.
@@ -242,9 +250,9 @@ if ($enableEmail) {
   $toml = [regex]::Replace($toml, '(?m)^# (\[\[send_email\]\])$',   '$1')
   $toml = [regex]::Replace($toml, '(?m)^# (name = "SEND_EMAIL")$',  '$1')
   $toml = $toml.Replace('# destination_address = "REPLACE_ME_WITH_DESTINATION_EMAIL"',
-                         "destination_address = `"$emailTo`"")
+                         "destination_address = $(Quote-Str $emailTo)")
   $toml = [regex]::Replace($toml, '(CLOUDFLARE_ZONE_ID\s*=\s*"[^"]*")',
-                            "`$1`nEMAIL_FROM = `"$emailFrom`"`nEMAIL_TO   = `"$emailTo`"")
+                            "`$1`nEMAIL_FROM = $(Quote-Str $emailFrom)`nEMAIL_TO   = $(Quote-Str $emailTo)")
 }
 
 [System.IO.File]::WriteAllText("$PWD\wrangler.toml", $toml)
@@ -268,12 +276,12 @@ $pagesPattern   = "pages: (?:'all'(?: as 'all' \| string\[\])?|\[[^\]]*\](?: as 
 
 $workersValue = switch ($blockWorkersChoice) {
   'all'  { "'all'" }
-  'list' { '[' + (($blockWorkersList | ForEach-Object { "'$_'" }) -join ', ') + ']' }
+  'list' { '[' + (($blockWorkersList | ForEach-Object { Quote-Str $_ }) -join ', ') + ']' }
   default { '[]' }
 }
 $pagesValue = switch ($blockPagesChoice) {
   'all'  { "'all'" }
-  'list' { '[' + (($blockPagesList | ForEach-Object { "'$_'" }) -join ', ') + ']' }
+  'list' { '[' + (($blockPagesList | ForEach-Object { Quote-Str $_ }) -join ', ') + ']' }
   default { '[]' }
 }
 $cfg = [regex]::Replace($cfg, $workersPattern, "workers: $workersValue,")

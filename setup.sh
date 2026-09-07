@@ -230,7 +230,14 @@ BLOCK_WORKERS_LIST="$BLOCK_WORKERS_LIST" \
 BLOCK_PAGES_CHOICE="$BLOCK_PAGES_CHOICE" \
 BLOCK_PAGES_LIST="$BLOCK_PAGES_LIST" \
 python3 << 'PY'
-import os, re
+import json, os, re
+
+# A quote or backslash in an operator-supplied value (an email address, a
+# Pages project name) would otherwise produce a config.ts or wrangler.toml
+# that does not parse. JSON string syntax is a subset of both TypeScript's
+# and TOML's basic strings, so json.dumps is a correct escaper for both.
+def q(value):
+    return json.dumps(str(value))
 
 kv_id          = os.environ['KV_ID']
 account_id     = os.environ['ACCOUNT_ID']
@@ -255,9 +262,9 @@ if enable_email:
     t = re.sub(r'^# (\[\[send_email\]\])$',      r'\1',                  t, flags=re.MULTILINE)
     t = re.sub(r'^# (name = "SEND_EMAIL")$',      r'\1',                  t, flags=re.MULTILINE)
     t = t.replace('# destination_address = "REPLACE_ME_WITH_DESTINATION_EMAIL"',
-                  f'destination_address = "{email_to}"')
+                  f'destination_address = {q(email_to)}')
     t = re.sub(r'(CLOUDFLARE_ZONE_ID\s*=\s*"[^"]*")',
-               f'\\1\nEMAIL_FROM = "{email_from}"\nEMAIL_TO   = "{email_to}"', t)
+               lambda m: f'{m.group(1)}\nEMAIL_FROM = {q(email_from)}\nEMAIL_TO   = {q(email_to)}', t)
 
 with open('wrangler.toml', 'w') as f:
     f.write(t)
@@ -286,7 +293,7 @@ def blocking_value(choice, names):
     if choice == 'all':
         return "'all'"
     if choice == 'list' and names:
-        return '[' + ', '.join(f"'{s.strip()}'" for s in names) + ']'
+        return '[' + ', '.join(q(s.strip()) for s in names) + ']'
     return '[]'
 
 c = re.sub(workers_re, f"workers: {blocking_value(block_workers_choice, block_workers_list)},", c)
