@@ -69,6 +69,12 @@ demonstrate concrete impact:
 - `blocking.workers` disables the `workers.dev` subdomain only. A Worker served
   on a custom domain or route keeps serving unless a WAF rule covers its zone
   (`scope: 'zone'` / `'account'`).
+- A remnant that can never be restored (a deleted Pages project, say) is
+  retried on every 5-minute tick, costing roughly 288 KV writes/day against the
+  free tier's 1,000. This cannot self-trigger a kill — the tick returns before
+  re-evaluating metrics — but it is deliberate: the alternative, capping the
+  retries, permanently strands accounts that have `enableRecoveryWebhook: false`
+  and so have no manual path back.
 - On the Workers Free plan an invocation is capped at 50 subrequests. A kill
   with `workers: 'all'` and `pages: 'all'` on an account with many scripts and
   projects can exhaust that budget mid-kill; the failures are logged and

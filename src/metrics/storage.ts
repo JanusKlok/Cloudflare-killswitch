@@ -7,10 +7,13 @@
  */
 
 /** Cloudflare's storage datasets are periodic snapshots, not per-request rows.
- *  Two days (or 24h) is wide enough to survive a late snapshot and narrow
- *  enough that the max within it is effectively the current value. */
+ *  Two days is wide enough to survive a late snapshot and narrow enough that
+ *  the max within it is effectively the current value.  The R2 equivalent is
+ *  kept at the same width: a narrower window risks returning no rows at all if
+ *  R2 snapshots less often than daily, which would make sumPerEntityMax throw
+ *  on every tick for any account with R2 activity. */
 export const STORAGE_WINDOW_DAYS = 2;
-export const STORAGE_WINDOW_HOURS = 24;
+export const STORAGE_WINDOW_HOURS = 48;
 
 /** Sums the per-entity maximum across `rows`.
  *

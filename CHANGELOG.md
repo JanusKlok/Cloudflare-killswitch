@@ -7,6 +7,7 @@ All notable changes to this project are documented here.  Format follows [Keep a
 ### Added
 
 - **Linting and formatting**: `pnpm lint` (oxlint with type-aware rules + a Prettier check) and `pnpm format`, both wired into CI. oxlint and Prettier were chosen over ESLint for their near-zero dependency footprint, in keeping with the project's supply-chain posture. The type-aware `no-floating-promises` / `no-misused-promises` pass found no defects, which is a useful signal for a codebase this promise-heavy.
+- `test/restore.test.ts`, covering the restore path that had none. Its first case is the one every `scope: 'none'` account takes — a killed state with no WAF rule recorded — which must count as fully restored; reporting a partial failure there would make `/restore` return 502 forever and auto-reset bail, leaving the account permanently killed.
 - Tests for the previously uncovered modules: `src/util/retry.ts`, `src/util/cf-api.ts`, `src/graphql/client.ts`, `src/actions/purge-d1.ts` and `src/actions/email.ts` (`test/util.test.ts`). The email deadlock above was found this way.
 - `.gitattributes` normalising text files to LF and pinning `*.sh` to `eol=lf`. Without it a Windows clone with `core.autocrlf=true` gets a CRLF shebang in `setup.sh`, which fails with `bad interpreter: /usr/bin/env bash^M`.
 - A **Known limitations** section in `SECURITY.md` recording the soft `/restore` rate limit, the `workers.dev`-only scope of `blocking.workers`, and the free-plan subrequest ceiling — each previously implicit.
@@ -18,6 +19,7 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Changed
 
+- R2's storage query window widened from 24h to 48h, matching KV's and D1's. If R2 snapshots less often than daily, the narrower window could return no rows and make `sumPerEntityMax` throw on every tick for any account with R2 activity; a gauge reads the same either way.
 - Byte values in alert emails use binary units (`GiB`/`MiB`/`KiB`). The configured limits are binary — Cloudflare's "1 GB" KV allowance is 1,073,741,824 bytes — so dividing by 1e9 rendered the limit itself as "1.07 GB", which read like it had already been exceeded.
 - The setup scripts JSON-escape every operator-supplied value they write into `src/config.ts` and `wrangler.toml`. An apostrophe in a Pages project name or a quote in an email address previously produced a file that would not parse. JSON string syntax is a subset of both TypeScript's and TOML's basic strings, so one escaper covers both.
 - `setup.ps1` generates the recovery secret with `RandomNumberGenerator.Fill` instead of `RNGCryptoServiceProvider`, which is obsolete from .NET 6 (SYSLIB0023) and was never disposed. Same CSPRNG, no deprecation warning.
