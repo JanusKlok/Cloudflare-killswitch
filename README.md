@@ -929,7 +929,22 @@ There is no `wrangler` command that lists cron triggers, so confirm the schedule
 pnpm exec wrangler tail --format pretty
 ```
 
-Leave it running until a tick arrives (within 5 minutes on the default `*/5 * * * *`), then read it as follows:
+Leave it running until a tick arrives (within 5 minutes on the default `*/5 * * * *`). This is a real capture from a healthy install:
+
+```
+Successfully created tail, expires at 2026-09-08T15:02:15Z
+Connected to cloudflare-killswitch, waiting for logs...
+"*/5 * * * *" @ 8.9.2026, 11.05.03 - Ok
+"*/5 * * * *" @ 8.9.2026, 11.10.03 - Ok
+```
+
+That is the whole output — two ticks, five minutes apart, `Ok`, and **not one log line between them**. That silence is the result you want, and it is a stronger signal than it looks: the monitoring routine returns early without logging only when every metric module resolved *and* nothing breached. There is no code path where a failed usage query produces a silent tick, so a clean tick proves the API token's `Account Analytics: Read` is working across all five services.
+
+(Wrangler prints timestamps in your system locale — `8.9.2026` is 8 September here.)
+
+Wait for a second tick before concluding anything. One tick tells you the Worker ran; two on schedule tell you the cron trigger is genuinely registered rather than a one-off.
+
+Read a non-silent tail as follows:
 
 | What you see | What it means |
 |---|---|

@@ -11,7 +11,9 @@ All notable changes to this project are documented here.  Format follows [Keep a
   a table mapping each log line to what it means, plus an optional live fire
   drill for the blocking path. The motivating problem: a Worker that cannot read
   its metrics is indistinguishable from one with nothing to report, since a
-  healthy tick logs nothing at all.
+  healthy tick logs nothing at all. Includes a real (anonymised) `wrangler tail`
+  capture from a healthy install, so the expected output is something you can
+  compare against rather than infer — contributed from a live deploy.
 
 ### Fixed
 
