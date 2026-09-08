@@ -22,7 +22,7 @@
     "types": "wrangler types"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.16.20",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
     "@cloudflare/workers-types": "4.20260626.1",
     "oxlint": "1.80.0",
     "oxlint-tsgolint": "7.0.2001",
