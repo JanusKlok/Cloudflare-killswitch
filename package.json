@@ -22,14 +22,14 @@
     "types": "wrangler types"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.16.20",
-    "@cloudflare/workers-types": "4.20260626.1",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "4.20260702.1",
     "oxlint": "1.80.0",
     "oxlint-tsgolint": "7.0.2001",
     "prettier": "3.9.6",
-    "tsx": "4.22.4",
+    "tsx": "4.23.13",
     "typescript": "6.0.3",
-    "vitest": "4.1.9",
+    "vitest": "4.1.11",
     "wrangler": "4.105.0"
   }
 }

@@ -28,7 +28,7 @@ All notable changes to this project are documented here.  Format follows [Keep a
 - Auto-reset is no longer gated on the anniversary day itself. It now fires on the first tick where the kill predates the current billing period, so a Worker that was down for the whole of that day still recovers instead of waiting another full cycle.
 - Per-cycle metric windows are anchored to `billingCycleDay` instead of the 1st of the calendar month. With a cycle starting on the 17th, a check on 5 February previously counted only 1-5 February and missed 17-31 January, so the switch fired after the overage had already been billed.
 - `MetricSample.window` / `Breach.window` renamed their `'month'` variant to `'cycle'`, and alert emails now read `per billing cycle` rather than `(month)`.
-- Dev dependencies bumped to the newest versions clearing the 7-day quarantine: wrangler 4.105.0, @cloudflare/vitest-pool-workers 0.16.20, @cloudflare/workers-types 4.20260626.1, vitest 4.1.9; CI uses actions/checkout@v7.
+- Dev dependencies bumped to the newest versions clearing the 7-day quarantine: @cloudflare/vitest-pool-workers 0.22.0, @cloudflare/workers-types 4.20260702.1, tsx 4.23.13, vitest 4.1.11, wrangler 4.105.0; CI uses actions/checkout@v7.
 - The vitest pool now pins an explicit `compatibilityDate`. Without it the pool defaults to "today", which can exceed the newest date the installed workerd binary supports, failing every test with `ERR_RUNTIME_FAILURE`.
 
 - Purges are now scoped to the breaching service: R2 purge targets only run on an R2 `purgeAt` breach and D1 targets only on a D1 breach. Previously a `purgeAt` breach on *any* metric (e.g. a Workers request spike) purged every configured R2 bucket and D1 table.
