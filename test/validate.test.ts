@@ -16,9 +16,18 @@ id = "0123456789abcdef0123456789abcdef"
 
 [vars]
 CLOUDFLARE_ACCOUNT_ID = "aaaabbbbccccddddeeeeffff00001111"
-CLOUDFLARE_ZONE_ID = "1111222233334444"
+CLOUDFLARE_ZONE_ID = "11112222333344445555666677778888"
 WORKER_SELF_NAME = "cloudflare-killswitch"
 `;
+
+/** Overrides one `key = "value"` line in a TOML fixture.  Throws if the key is
+ *  absent, so a fixture change breaks the test loudly instead of leaving it
+ *  asserting against an unmodified copy. */
+function withKey(toml: string, key: string, value: string): string {
+  const re = new RegExp(`^${key} = "[^"]*"$`, 'm');
+  if (!re.test(toml)) throw new Error(`fixture has no \`${key}\` line to override`);
+  return toml.replace(re, `${key} = "${value}"`);
+}
 
 function cfgWith(overrides: Partial<AppConfig>): AppConfig {
   return { ...CONFIG, ...overrides };
@@ -62,10 +71,7 @@ describe('parseWranglerToml', () => {
 
 describe('validate — scope', () => {
   it("errors when scope 'zone' has an empty zone ID", () => {
-    const toml = GOOD_TOML.replace(
-      'CLOUDFLARE_ZONE_ID = "1111222233334444"',
-      'CLOUDFLARE_ZONE_ID = ""',
-    );
+    const toml = withKey(GOOD_TOML, 'CLOUDFLARE_ZONE_ID', '');
     const issues = validate(cfgWith({ scope: 'zone' }), parseWranglerToml(toml));
     expect(errors(issues).join(' ')).toContain('CLOUDFLARE_ZONE_ID');
   });
@@ -124,12 +130,10 @@ describe('validate — email', () => {
 
 describe('validate — identifiers', () => {
   it('errors on placeholder account ID and KV namespace id', () => {
-    const toml = GOOD_TOML.replace(
-      'id = "0123456789abcdef0123456789abcdef"',
-      'id = "REPLACE_ME_WITH_YOUR_KV_NAMESPACE_ID"',
-    ).replace(
-      'CLOUDFLARE_ACCOUNT_ID = "aaaabbbbccccddddeeeeffff00001111"',
-      'CLOUDFLARE_ACCOUNT_ID = "REPLACE_ME_WITH_YOUR_ACCOUNT_ID"',
+    const toml = withKey(
+      withKey(GOOD_TOML, 'id', 'REPLACE_ME_WITH_YOUR_KV_NAMESPACE_ID'),
+      'CLOUDFLARE_ACCOUNT_ID',
+      'REPLACE_ME_WITH_YOUR_ACCOUNT_ID',
     );
     const issues = validate(cfgWith({ scope: 'zone' }), parseWranglerToml(toml));
     expect(errors(issues).some((t) => t.includes('CLOUDFLARE_ACCOUNT_ID'))).toBe(true);
@@ -137,10 +141,7 @@ describe('validate — identifiers', () => {
   });
 
   it("errors when WORKER_SELF_NAME mismatches and blocking.workers is 'all' (would disable itself)", () => {
-    const toml = GOOD_TOML.replace(
-      'WORKER_SELF_NAME = "cloudflare-killswitch"',
-      'WORKER_SELF_NAME = "wrong-name"',
-    );
+    const toml = withKey(GOOD_TOML, 'WORKER_SELF_NAME', 'wrong-name');
     const cfg = cfgWith({
       scope: 'zone',
       blocking: { ...CONFIG.blocking, workers: 'all', pages: [] },
@@ -242,5 +243,84 @@ describe('validate — billingCycleDay', () => {
       parseWranglerToml(GOOD_TOML),
     );
     expect(notes(issues).join(' ')).not.toContain('Auto-reset is on');
+  });
+});
+
+describe('validate — Cloudflare id shapes', () => {
+  const HEX32 = '0123456789abcdef0123456789abcdef';
+
+  function tomlWith(vars: Record<string, string>, kvId = HEX32): string {
+    const lines = Object.entries(vars).map(([k, v]) => `${k} = "${v}"`);
+    return [
+      'name = "cloudflare-killswitch"',
+      '',
+      '[[kv_namespaces]]',
+      'binding = "KILL_SWITCH_STATE"',
+      `id = "${kvId}"`,
+      '',
+      '[vars]',
+      'WORKER_SELF_NAME = "cloudflare-killswitch"',
+      ...lines,
+    ].join('\n');
+  }
+
+  /** A short or stand-in id passes `isPlaceholder` but fails at fire time —
+   *  the one moment nothing may fail. These caught a real live misconfiguration
+   *  where the word "none" had been pasted into CLOUDFLARE_ZONE_ID. */
+  it.each(['none', 'abc', HEX32.toUpperCase(), `${HEX32}00`, '1234'])(
+    'rejects zone id %p under scope zone',
+    (zoneId) => {
+      const issues = validate(
+        cfgWith({ scope: 'zone' }),
+        parseWranglerToml(tomlWith({ CLOUDFLARE_ACCOUNT_ID: HEX32, CLOUDFLARE_ZONE_ID: zoneId })),
+      );
+      expect(errors(issues).join(' ')).toContain('not a valid Cloudflare zone ID');
+    },
+  );
+
+  it('accepts a well-formed zone id', () => {
+    const issues = validate(
+      cfgWith({ scope: 'zone' }),
+      parseWranglerToml(tomlWith({ CLOUDFLARE_ACCOUNT_ID: HEX32, CLOUDFLARE_ZONE_ID: HEX32 })),
+    );
+    expect(errors(issues).join(' ')).not.toContain('CLOUDFLARE_ZONE_ID');
+  });
+
+  it('still reports an empty zone id as missing rather than malformed', () => {
+    const issues = validate(
+      cfgWith({ scope: 'zone' }),
+      parseWranglerToml(tomlWith({ CLOUDFLARE_ACCOUNT_ID: HEX32, CLOUDFLARE_ZONE_ID: '' })),
+    );
+    const text = errors(issues).join(' ');
+    expect(text).toContain('empty or a placeholder');
+    expect(text).not.toContain('not a valid Cloudflare zone ID');
+  });
+
+  it('ignores a malformed zone id when scope is not zone', () => {
+    const issues = validate(
+      cfgWith({ scope: 'none', blocking: { workers: 'all', pages: [] } }),
+      parseWranglerToml(tomlWith({ CLOUDFLARE_ACCOUNT_ID: HEX32, CLOUDFLARE_ZONE_ID: 'none' })),
+    );
+    expect(errors(issues).join(' ')).not.toContain('CLOUDFLARE_ZONE_ID');
+  });
+
+  it('rejects a malformed account id', () => {
+    const issues = validate(
+      cfgWith({ scope: 'zone' }),
+      parseWranglerToml(
+        tomlWith({ CLOUDFLARE_ACCOUNT_ID: 'not-an-id', CLOUDFLARE_ZONE_ID: HEX32 }),
+      ),
+    );
+    expect(errors(issues).join(' ')).toContain('not a valid Cloudflare account ID');
+  });
+
+  it('rejects a malformed KV namespace id', () => {
+    const issues = validate(
+      cfgWith({ scope: 'zone' }),
+      parseWranglerToml(
+        tomlWith({ CLOUDFLARE_ACCOUNT_ID: HEX32, CLOUDFLARE_ZONE_ID: HEX32 }, 'deadbeef'),
+      ),
+    );
+    expect(errors(issues).join(' ')).toContain('not a valid Cloudflare id');
   });
 });

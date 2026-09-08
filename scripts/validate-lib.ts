@@ -72,6 +72,16 @@ function isPlaceholder(value: string | undefined): boolean {
   return !value || value.includes('REPLACE_ME');
 }
 
+/** Cloudflare account, zone and KV namespace ids are all 32 lowercase hex
+ *  characters.  Checking the shape catches a truncated paste or a stand-in
+ *  value, which isPlaceholder waves through: those only fail later, at the
+ *  moment the kill fires, which is the one moment nothing may fail. */
+const CF_ID_RE = /^[0-9a-f]{32}$/;
+
+function isMalformedId(value: string | undefined): boolean {
+  return !isPlaceholder(value) && !CF_ID_RE.test(value ?? '');
+}
+
 export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
   const issues: Issue[] = [];
   const add = (level: IssueLevel, title: string, ...detail: string[]) =>
@@ -88,6 +98,13 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
       'Every metric query and blocking action needs the account ID.',
       'Fix: dashboard -> Workers & Pages -> right sidebar -> Account ID.',
     );
+  } else if (isMalformedId(w.vars['CLOUDFLARE_ACCOUNT_ID'])) {
+    add(
+      'error',
+      `CLOUDFLARE_ACCOUNT_ID ("${w.vars['CLOUDFLARE_ACCOUNT_ID'] ?? ''}") is not a valid Cloudflare account ID`,
+      'Account IDs are exactly 32 lowercase hex characters. Every metric query would fail, so no breach is ever detected and the kill switch never fires.',
+      'Fix: copy the full Account ID from dashboard -> Workers & Pages -> right sidebar.',
+    );
   }
   if (w.kvNamespaceIds.length === 0 || w.kvNamespaceIds.some(isPlaceholder)) {
     add(
@@ -95,6 +112,13 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
       'The KILL_SWITCH_STATE KV namespace id is missing or a placeholder',
       'The kill switch stores its state in KV — it cannot run without it.',
       'Fix: run `pnpm exec wrangler kv namespace create KILL_SWITCH_STATE` and paste the id into [[kv_namespaces]].',
+    );
+  } else if (w.kvNamespaceIds.some(isMalformedId)) {
+    add(
+      'error',
+      'A KILL_SWITCH_STATE KV namespace id is not a valid Cloudflare id',
+      'Namespace ids are exactly 32 lowercase hex characters. The deploy fails, or the Worker cannot read or write its own state.',
+      'Fix: run `pnpm exec wrangler kv namespace list` and paste the full id into [[kv_namespaces]].',
     );
   }
   if (w.workerName && w.vars['WORKER_SELF_NAME'] !== w.workerName) {
@@ -129,6 +153,14 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
       "scope is 'zone' but CLOUDFLARE_ZONE_ID is empty or a placeholder",
       'The deploy succeeds, but the WAF call fails when the kill switch fires — no traffic gets blocked.',
       'Fix: set CLOUDFLARE_ZONE_ID in [vars] (dashboard -> your domain -> Overview -> Zone ID).',
+      "No domain on your account? Set scope: 'none' in src/config.ts and configure blocking.workers / blocking.pages instead.",
+    );
+  } else if (cfg.scope === 'zone' && isMalformedId(w.vars['CLOUDFLARE_ZONE_ID'])) {
+    add(
+      'error',
+      `scope is 'zone' but CLOUDFLARE_ZONE_ID ("${w.vars['CLOUDFLARE_ZONE_ID'] ?? ''}") is not a valid Cloudflare zone ID`,
+      'Zone IDs are exactly 32 lowercase hex characters. The deploy succeeds and this check used to pass, but the WAF call fails when the kill fires — no traffic gets blocked, and with blocking.workers/pages empty the kill switch takes no action at all.',
+      'Fix: dashboard -> your domain -> Overview -> Zone ID (paste the full value).',
       "No domain on your account? Set scope: 'none' in src/config.ts and configure blocking.workers / blocking.pages instead.",
     );
   }
