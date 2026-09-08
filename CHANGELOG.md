@@ -4,6 +4,8 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-09-08
+
 ### Added
 
 - **A "Verifying it works" section in the README.** Four ordered checks —

@@ -1,6 +1,6 @@
 {
   "name": "cloudflare-killswitch",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Cloudflare Worker that monitors free-tier usage every 5 minutes and automatically blocks all traffic when any limit is breached.",
   "license": "MIT",
   "private": true,
