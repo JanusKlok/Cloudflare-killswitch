@@ -916,6 +916,14 @@ pnpm run deploy
 
 Create a **Custom Token** at `dash.cloudflare.com/profile/api-tokens`. Click "Create Token" → "Get started" (custom token).
 
+**Always required, whatever your configuration:**
+
+| Permission group | Permission | Level |
+|------------------|-----------|-------|
+| Account → Account Analytics | Read | Account |
+
+Every metric this Worker reads comes from the account-scoped GraphQL Analytics API. Without this permission each query returns 403, no breach is ever detected, and the kill switch sits there looking deployed while doing nothing — the quietest possible failure. Add the permissions below on top of it.
+
 **For `scope: 'zone'` (default, WAF only):**
 
 | Permission group | Permission | Level |
@@ -942,7 +950,7 @@ Create a **Custom Token** at `dash.cloudflare.com/profile/api-tokens`. Click "Cr
 |------------------|-----------|-------|
 | Account → Cloudflare Pages | Edit | Account |
 
-The token does not need explicit read permissions for analytics — Cloudflare GraphQL Analytics access is included with zone/account membership.
+Account membership alone does **not** grant GraphQL Analytics access to an API token — `Account Analytics: Read` above is required, and account-scoped datasets need it at the account level rather than scoped to a single zone.
 
 Scope the token to specific zones or accounts where possible to follow the principle of least privilege. After creating the token, copy it immediately — Cloudflare only shows it once.
 

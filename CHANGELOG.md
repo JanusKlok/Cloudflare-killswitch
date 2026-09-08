@@ -4,6 +4,20 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documented API-token permissions omitted the one that gates every
+  metric.** `pnpm run validate` listed only the WAF/Workers/Pages permissions
+  for your scope, and the README stated outright that "the token does not need
+  explicit read permissions for analytics". Both were wrong: every metric reads
+  the account-scoped GraphQL Analytics API (`viewer { accounts { ... } }`),
+  which requires `Account -> Account Analytics: Read`. A token built by
+  following the old docs returns 403 on every query, so no breach is ever
+  detected and the kill switch sits there looking deployed while doing nothing.
+  The validator now always lists it first, whatever the scope, and the README
+  documents it as unconditional. Found while creating a token for a real
+  deploy.
+
 ### Changed
 
 - **BREAKING — `src/config.ts` is no longer tracked.** The setup scripts rewrite

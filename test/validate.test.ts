@@ -209,6 +209,21 @@ describe('validate — notes', () => {
     expect(notes).toContain('Workers Scripts: Edit');
     expect(notes).toContain('Cloudflare Pages: Edit');
   });
+
+  // Account Analytics: Read gates every metric query, so it is the one
+  // permission that is never optional — a token missing it detects no breach at
+  // all, which is a far quieter failure than a WAF or Workers permission gap.
+  it.each([
+    ['zone', { scope: 'zone' as const, blocking: { workers: [], pages: [] } }],
+    ['none', { scope: 'none' as const, blocking: { workers: 'all' as const, pages: [] } }],
+  ])('always requires Account Analytics: Read (scope %s)', (_label, overrides) => {
+    const issues = validate(cfgWith(overrides), parseWranglerToml(GOOD_TOML));
+    const notes = issues
+      .filter((i) => i.level === 'note')
+      .flatMap((i) => [i.title, ...i.detail])
+      .join('\n');
+    expect(notes).toContain('Account -> Account Analytics: Read');
+  });
 });
 
 describe('validate — billingCycleDay', () => {

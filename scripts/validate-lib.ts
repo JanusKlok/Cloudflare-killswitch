@@ -280,19 +280,21 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
   }
 
   // --- reminders the validator cannot check itself ---------------------------
-  const perms: string[] = [];
+  // Every metric reads account-scoped GraphQL (viewer { accounts { ... } }), so
+  // this one is required whatever the scope and blocking settings are. Without
+  // it each query 403s, no breach is ever detected, and the kill switch sits
+  // there looking deployed while doing nothing.
+  const perms: string[] = ['Account -> Account Analytics: Read'];
   if (cfg.scope === 'zone') perms.push('Zone -> WAF: Edit (for your zone)');
   if (cfg.scope === 'account') perms.push('Account -> Account WAF: Edit');
   if (!workersOff) perms.push('Account -> Workers Scripts: Edit');
   if (!pagesOff) perms.push('Account -> Cloudflare Pages: Edit');
-  if (perms.length > 0) {
-    add(
-      'note',
-      'CLOUDFLARE_API_TOKEN needs these permissions for this configuration:',
-      ...perms.map((p) => `  - ${p}`),
-      'The validator cannot inspect the token — verify at dash.cloudflare.com/profile/api-tokens.',
-    );
-  }
+  add(
+    'note',
+    'CLOUDFLARE_API_TOKEN needs these permissions for this configuration:',
+    ...perms.map((p) => `  - ${p}`),
+    'The validator cannot inspect the token — verify at dash.cloudflare.com/profile/api-tokens.',
+  );
   if (cfg.autoResetOnBillingCycle && isValidBillingCycleDay(cfg.billingCycleDay)) {
     add(
       'note',
