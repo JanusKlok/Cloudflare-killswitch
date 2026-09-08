@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { CONFIG } from '../src/config.js';
+import { CONFIG } from '../src/config.example.js';
 
-// The setup scripts rewrite src/config.ts in place, so a local setup run can
-// leak an operator's own (far more destructive) choices into a commit — it
-// happened once already. These assertions pin the shipped defaults to the safe
-// values the README documents so that regression cannot land silently again.
-describe('shipped config.ts defaults', () => {
+// src/config.example.ts is what an operator copies to src/config.ts, so its
+// defaults are what an unattended or half-finished setup ends up running.
+// A local setup run once leaked an operator's own (far more destructive)
+// choices into a commit, back when config.ts itself was tracked; config.ts is
+// untracked now, and these assertions keep the file it is seeded from safe.
+describe('shipped config.example.ts defaults', () => {
   it("defaults scope to 'zone'", () => {
     expect(CONFIG.scope).toBe('zone');
   });

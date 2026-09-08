@@ -27,13 +27,10 @@ This is also a security-sensitive tool — small bugs can mean a real outage doe
 
    CI runs the same commands and will block any PR that fails them. `pnpm format` applies the Prettier formatting `pnpm lint` checks for.
 
-   > **If you ran `setup.ps1` / `setup.sh` in this clone**, `test/config-defaults.test.ts`
-   > will fail — and that is the test doing its job. The setup scripts rewrite
-   > `src/config.ts` in place with *your* account's choices, and that file is
-   > tracked, so a past setup run once got committed and shipped the most
-   > destructive settings as the project defaults. Revert your local
-   > `src/config.ts` (`git checkout -- src/config.ts`) before running the suite,
-   > and never commit it. CI is unaffected, since it tests a clean checkout.
+   > `src/config.ts` is untracked — copy it from `src/config.example.ts` (or run
+   > a setup script) before running the suite in a fresh clone. Your own account's
+   > choices live in that copy and cannot reach a commit; edit
+   > `src/config.example.ts` when you mean to change the shipped defaults.
 
 4. **Try your change against a real Cloudflare account when feasible.** The miniflare-backed test suite catches most bugs but doesn't exercise live Cloudflare API behaviour. For non-trivial changes to `actions/`, deploy to a test account first.
 

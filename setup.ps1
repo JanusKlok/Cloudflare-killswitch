@@ -258,7 +258,10 @@ if ($enableEmail) {
 [System.IO.File]::WriteAllText("$PWD\wrangler.toml", $toml)
 Write-Ok "wrangler.toml updated"
 
-Write-Info "Updating src/config.ts..."
+# config.ts is untracked and seeded from the example, so re-running setup starts
+# from the documented defaults rather than compounding the last run's answers.
+Write-Info "Creating src/config.ts from template..."
+Copy-Item src/config.example.ts src/config.ts -Force
 $cfg = Get-Content src/config.ts -Raw
 
 # Regex anchors (not literal defaults) so the script also works on a config.ts

@@ -214,6 +214,10 @@ section "Applying configuration"
 
 info "Creating wrangler.toml from template..."
 cp wrangler.toml.example wrangler.toml
+# config.ts is untracked and seeded from the example, so re-running setup starts
+# from the documented defaults rather than compounding the last run's answers.
+info "Creating src/config.ts from template..."
+cp src/config.example.ts src/config.ts
 info "Applying configuration..."
 KV_ID="$KV_ID" \
 ACCOUNT_ID="$ACCOUNT_ID" \

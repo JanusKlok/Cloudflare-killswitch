@@ -1,13 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import setupSh from '../setup.sh?raw';
 import setupPs1 from '../setup.ps1?raw';
-import configTs from '../src/config.ts?raw';
+import configTs from '../src/config.example.ts?raw';
 
-// setup.sh / setup.ps1 rewrite src/config.ts with regex anchors rather than
-// literal defaults. A renamed config field does not make them fail — the
-// substitution just silently no-ops and the operator's answers are dropped,
-// which is how the C2 defaults regression went unnoticed. These tests run each
-// anchor against the real config.ts so a rename breaks the build instead.
+// setup.sh / setup.ps1 seed src/config.ts from src/config.example.ts and then
+// rewrite it with regex anchors rather than literal defaults. A renamed config
+// field does not make them fail — the substitution just silently no-ops and the
+// operator's answers are dropped, which is how the C2 defaults regression went
+// unnoticed. These tests run each anchor against the example the scripts copy
+// from, so a rename breaks the build instead.
 const ANCHORS: Array<{ field: string; pattern: RegExp }> = [
   { field: 'scope', pattern: /scope: '(?:zone|account|none)'/ },
   { field: 'billingCycleDay', pattern: /billingCycleDay: \d+/ },
@@ -25,7 +26,7 @@ const ANCHORS: Array<{ field: string; pattern: RegExp }> = [
 
 describe('setup script config.ts anchors', () => {
   for (const { field, pattern } of ANCHORS) {
-    it(`still matches ${field} in src/config.ts`, () => {
+    it(`still matches ${field} in src/config.example.ts`, () => {
       expect(configTs).toMatch(pattern);
     });
 

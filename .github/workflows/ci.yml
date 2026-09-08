@@ -53,8 +53,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Create wrangler.toml from example
-        run: cp wrangler.toml.example wrangler.toml
+      - name: Create wrangler.toml and src/config.ts from examples
+        run: |
+          cp wrangler.toml.example wrangler.toml
+          cp src/config.example.ts src/config.ts
 
       - name: Generate Cloudflare runtime types
         run: pnpm types

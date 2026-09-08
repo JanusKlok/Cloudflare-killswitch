@@ -4,6 +4,41 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `src/config.ts` is no longer tracked.** The setup scripts rewrite
+  it in place, so while it was in the repo a local setup run could be committed
+  and ship one operator's choices as the project defaults — which is exactly
+  what happened once (see the C2 note below). The file is now gitignored and
+  seeded from a new tracked `src/config.example.ts`; setup copies the example
+  before applying your answers, so re-running setup starts from the documented
+  defaults instead of compounding the previous run's. Your thresholds stay out of
+  the repo, a `git pull` can no longer overwrite them, and they can no longer
+  reach a pull request.
+
+  **Migration — back up your config before pulling this change.** Git deletes a
+  path that a commit removes from the index, so an unmodified `src/config.ts`
+  will disappear on `git pull`, and a modified one will raise a checkout
+  conflict:
+
+  ```bash
+  cp src/config.ts ../config.ts.bak   # then pull, then:
+  cp ../config.ts.bak src/config.ts
+  ```
+
+  Fresh clones run `cp src/config.example.ts src/config.ts` (or a setup script)
+  once before `pnpm test` or `pnpm run deploy`. Change the shipped defaults by
+  editing `src/config.example.ts`.
+- `pnpm run validate` loads `src/config.ts` through a dynamic import behind an
+  existence check, so a fresh clone gets the same actionable "copy the example"
+  message it already gave for a missing `wrangler.toml` instead of a
+  module-not-found stack trace.
+- `test/config-defaults.test.ts` is now `test/config-example.test.ts` and pins
+  the defaults in `src/config.example.ts`. It no longer fails after a local setup
+  run — the file it guards is not the file setup rewrites — so the caveat about
+  that in `CONTRIBUTING.md` is gone. `test/setup-scripts.test.ts` checks its
+  anchors against the example for the same reason.
+
 ### Added
 
 - **Linting and formatting**: `pnpm lint` (oxlint with type-aware rules + a Prettier check) and `pnpm format`, both wired into CI. oxlint and Prettier were chosen over ESLint for their near-zero dependency footprint, in keeping with the project's supply-chain posture. The type-aware `no-floating-promises` / `no-misused-promises` pass found no defects, which is a useful signal for a codebase this promise-heavy.

@@ -6,19 +6,36 @@
  *  Execute with tsx (not plain node): config.ts uses `.js` import specifiers
  *  that Node's type stripping does not resolve to .ts files. */
 import { readFileSync } from 'node:fs';
-import { CONFIG } from '../src/config.js';
 import { parseWranglerToml, validate, type IssueLevel } from './validate-lib.js';
 
-const tomlUrl = new URL('../wrangler.toml', import.meta.url);
-let toml: string;
-try {
-  toml = readFileSync(tomlUrl, 'utf8');
-} catch {
-  console.error('ERROR: wrangler.toml not found.');
-  console.error('  Fix: copy wrangler.toml.example to wrangler.toml and fill in your IDs,');
-  console.error('  or run the interactive setup script (setup.ps1 / setup.sh).');
+function missing(relative: string, fixes: string[]): never {
+  console.error(`ERROR: ${relative.replace('../', '')} not found.`);
+  for (const line of fixes) console.error(`  ${line}`);
   process.exit(1);
 }
+
+function readOrExit(relative: string, fixes: string[]): string {
+  try {
+    return readFileSync(new URL(relative, import.meta.url), 'utf8');
+  } catch {
+    return missing(relative, fixes);
+  }
+}
+
+const toml = readOrExit('../wrangler.toml', [
+  'Fix: copy wrangler.toml.example to wrangler.toml and fill in your IDs,',
+  'or run the interactive setup script (setup.ps1 / setup.sh).',
+]);
+
+// src/config.ts is untracked and copied from src/config.example.ts, so on a
+// fresh clone it does not exist yet. It has to be loaded dynamically, after
+// that check: a static import throws at module load, before this script can
+// print anything useful.
+readOrExit('../src/config.ts', [
+  'Fix: copy src/config.example.ts to src/config.ts and edit your thresholds,',
+  'or run the interactive setup script (setup.ps1 / setup.sh).',
+]);
+const { CONFIG } = await import('../src/config.js');
 
 const issues = validate(CONFIG, parseWranglerToml(toml));
 

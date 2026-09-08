@@ -240,6 +240,14 @@ Store it in a password manager. If you don't want the recovery webhook at all, s
 
 ### 6. Review src/config.ts
 
+If you ran a setup script it already created `src/config.ts` for you. Otherwise copy it from the template:
+
+```bash
+cp src/config.example.ts src/config.ts
+```
+
+`src/config.ts` is gitignored — it holds *your* thresholds and stays out of the repo, so a `git pull` never overwrites your settings and your settings never reach a pull request. Edit `src/config.example.ts` instead only if you mean to change the defaults the project ships.
+
 Open `src/config.ts`. **The defaults work without any changes** — all thresholds are pre-set to Cloudflare's standard free-tier values and the cron runs every 5 minutes.
 
 Only edit this file if you want to:
@@ -301,7 +309,7 @@ If the worker is running normally and no limits are breached, the state will be 
 
 ## Configuration reference
 
-All configuration lives in `src/config.ts`. The file is TypeScript — your editor will catch type errors.
+All configuration lives in `src/config.ts`, your untracked copy of `src/config.example.ts`. The file is TypeScript — your editor will catch type errors.
 
 ```ts
 export const CONFIG: AppConfig = {
