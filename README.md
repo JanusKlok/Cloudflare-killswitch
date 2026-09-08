@@ -34,6 +34,7 @@ No external services, no runtime dependencies. Runs entirely on Cloudflare infra
 - [Optional: Workers and Pages blocking](#optional-workers-and-pages-blocking)
 - [Optional: destructive purge](#optional-destructive-purge)
 - [Recovery](#recovery)
+- [Verifying it works](#verifying-it-works)
 - [API token permissions](#api-token-permissions)
 - [Local development and testing](#local-development-and-testing)
 - [Extending: adding a new service](#extending-adding-a-new-service)
@@ -47,8 +48,10 @@ No external services, no runtime dependencies. Runs entirely on Cloudflare infra
 On each cron tick (default: every 5 minutes, configurable in wrangler.toml):
 
   1. Read KV state
-       → status is 'killed' and not the 1st of a new month → exit immediately
-       → status is 'killed' and it's the 1st of a new month → remove WAF rule,
+       → status is 'killed', still inside the same billing period → exit
+         immediately
+       → status is 'killed' and a new billing period has opened (see
+         billingCycleDay) → remove WAF rule, re-enable Workers and Pages,
          reset to 'active', continue monitoring
 
   2. Query Cloudflare GraphQL Analytics API for current usage across
@@ -283,27 +286,15 @@ The polling interval is set in `wrangler.toml` under `[triggers] crons`. The def
 
 ### 8. Verify it's working
 
-Check the live worker logs:
+Watch a live cron tick — with the default schedule one arrives within 5 minutes:
 
 ```
-pnpm exec wrangler tail
+pnpm exec wrangler tail --format pretty
 ```
 
-Trigger a cron tick manually (the response body is empty — check the logs):
+A healthy tick shows the invocation with status `Ok` and **logs nothing else**. Any `Metric fetch errors (no breach detected):` line means the Worker cannot read your usage — most often a token missing `Account Analytics: Read`.
 
-```
-curl "https://your-worker.your-subdomain.workers.dev/__scheduled?cron=*%2F5+*+*+*+*"
-```
-
-Replace `*%2F5+*+*+*+*` with your configured cron expression (URL-encoded).
-
-Inspect the current KV state:
-
-```
-pnpm exec wrangler kv key get --namespace-id YOUR_KV_NAMESPACE_ID state
-```
-
-If the worker is running normally and no limits are breached, the state will be `null` (empty KV) or `{"status":"active",...}`.
+See [Verifying it works](#verifying-it-works) for the full checklist, what each failure looks like, and how to run a controlled live fire drill.
 
 ---
 
@@ -912,6 +903,99 @@ pnpm run deploy
 
 ---
 
+## Verifying it works
+
+A deployed kill switch that cannot read your usage looks exactly like one that has nothing to report: the cron runs, nothing is logged, and no traffic is blocked. Work through these four checks in order — each one rules out a different silent failure.
+
+### 1. The configuration is coherent
+
+```
+pnpm run validate
+```
+
+This cross-checks `src/config.ts` against `wrangler.toml` before anything reaches Cloudflare. It ends in `Config check passed.` and prints the exact API-token permissions your configuration needs. It cannot inspect the token itself, so treat that list as a to-do rather than a result.
+
+### 2. The Worker and its cron trigger are actually deployed
+
+```
+pnpm exec wrangler deployments list
+```
+
+There is no `wrangler` command that lists cron triggers, so confirm the schedule one of two ways: the `wrangler deploy` output ends with a `schedule:` line for every registered trigger, or check dashboard → Workers & Pages → your Worker → Settings → Trigger Events. A Worker with no cron trigger never evaluates anything, and nothing about it looks broken.
+
+### 3. A cron tick runs cleanly — the check that matters most
+
+```
+pnpm exec wrangler tail --format pretty
+```
+
+Leave it running until a tick arrives (within 5 minutes on the default `*/5 * * * *`), then read it as follows:
+
+| What you see | What it means |
+|---|---|
+| A `scheduled` invocation, status `Ok`, no log lines | **Healthy.** Every metric was read and nothing is near its limit. Silence is the success signal — the Worker only logs problems. |
+| `Metric fetch errors (no breach detected):` | The Worker cannot read your usage, so **it will never fire**. Almost always an API-token problem — see below. |
+| `scheduled tick failed:` | An unexpected error before monitoring began, e.g. KV unreachable. The message names the cause. |
+| No invocation at all within 5 minutes | The cron trigger is not registered — go back to check 2. |
+| `waf deploy error:` / `block-workers error:` / `block-pages error:` | A breach **was** detected and the Worker tried to act, but an action failed. Check that permission on the token. |
+
+If you see `Metric fetch errors`, the message carries the GraphQL error. A `403` means the token is missing `Account Analytics: Read` at the **account** level — the single most common misconfiguration, because it is the one permission the Worker needs no matter how everything else is set. See [API token permissions](#api-token-permissions).
+
+### 4. The stored state is what you expect
+
+```
+pnpm exec wrangler kv key get state --binding KILL_SWITCH_STATE --remote
+```
+
+The `--binding` form reads the namespace id out of your `wrangler.toml`, so there is nothing to paste.
+
+**A `404: Not Found` here is normal on a healthy install.** The `state` key is only written when the Worker kills or restores; until then there is nothing to read and the Worker treats the absent key as `active`. After a kill you get the full record instead:
+
+```json
+{
+  "status": "killed",
+  "timestamp": "2026-09-08T09:05:00.000Z",
+  "killedAt": "2026-09-08T09:05:00.000Z",
+  "reason": "1 block breach(es)",
+  "wafRuleId": "...",
+  "wafRulesetId": "...",
+  "disabledWorkerScripts": ["my-api", "my-cron"],
+  "blockedPagesProjects": [{ "project": "my-site", "previousDeploymentId": "..." }]
+}
+```
+
+`reason` is deliberately just a count — the per-metric breakdown (`workers.requests (per day): 104,213 observed, limit 100,000 [BLOCK]`) goes to the alert email and the logs, so enable [email alerts](#optional-email-alerts) if you want to know *which* limit went.
+
+`killedAt` is the auto-reset anchor, and `wafRuleId` / `disabledWorkerScripts` / `blockedPagesProjects` are the undo list — recovery replays exactly what is recorded here, which is why the Worker writes its intent *before* it mutates anything.
+
+Note that an absent key proves only that nothing has fired. It does **not** prove the Worker can read your usage — that is what check 3 is for.
+
+### Optional: a controlled live fire drill
+
+The checks above confirm the monitoring path. Only a real breach confirms the *blocking* path, and you can force one safely on a test account by lowering a threshold below your current usage.
+
+> **Read this first.** With `blocking.workers: 'all'` the drill disables the `workers.dev` subdomain of every Worker on the account except the kill switch, and with `blocking.pages: 'all'` it overwrites every Pages production deployment with a 503. Do not drill on an account serving anything you care about. If `purgeAt` is set on any metric, **remove it before drilling** — purge deletes R2 objects and D1 rows, and no restore path brings those back.
+
+1. **Give yourself a way back in first.** Set `enableRecoveryWebhook: true` in `src/config.ts`, run `pnpm exec wrangler secret put RECOVERY_SECRET` (any long random string), and deploy. Without this, undoing the drill means re-enabling every Worker and Pages project by hand in the dashboard.
+
+2. **Lower one threshold** below current usage — `limits.workers.requests.blockAt: 1` is the easiest — and deploy.
+
+3. **Watch it fire** in `wrangler tail`. Within one tick you should see the breach reason, then the actions. Confirm the effect independently: your other `workers.dev` URLs should stop serving, and with `scope: 'zone'` a rule named *Kill Switch — automated traffic block* appears under your zone's WAF Custom Rules.
+
+4. **Restore**:
+
+   ```
+   curl -X POST https://your-worker.your-subdomain.workers.dev/restore      -H "Authorization: Bearer YOUR_RECOVERY_SECRET"
+   ```
+
+   A `200` with `{"restored":true,...}` means everything in the undo list was reversed. A `502` lists what could not be reversed — fix those by hand before trusting the install.
+
+5. **Put the threshold back** and deploy. Re-check `pnpm run validate`, and turn the recovery webhook back off if you do not want it permanently.
+
+The drill is worth doing once on a throwaway account, because it is the only thing that proves the token's *write* permissions. Checks 1–4 exercise reads only.
+
+---
+
 ## API token permissions
 
 Create a **Custom Token** at `dash.cloudflare.com/profile/api-tokens`. Click "Create Token" → "Get started" (custom token).
@@ -960,9 +1044,10 @@ Scope the token to specific zones or accounts where possible to follow the princ
 
 ### Running tests
 
-The test suite runs against Miniflare (Cloudflare's local Workers runtime) — no real account or API token needed:
+The test suite runs against Miniflare (Cloudflare's local Workers runtime) — no real account or API token needed. In a fresh clone, create your config first (`src/config.ts` is gitignored, so it is not there yet):
 
 ```
+cp src/config.example.ts src/config.ts
 pnpm test
 ```
 

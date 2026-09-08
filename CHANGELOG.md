@@ -4,7 +4,33 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **A "Verifying it works" section in the README.** Four ordered checks —
+  config, deployment and cron trigger, a live cron tick, stored KV state — with
+  a table mapping each log line to what it means, plus an optional live fire
+  drill for the blocking path. The motivating problem: a Worker that cannot read
+  its metrics is indistinguishable from one with nothing to report, since a
+  healthy tick logs nothing at all.
+
 ### Fixed
+
+- **The README's verification step told you to do something that cannot work.**
+  It suggested triggering a tick with `curl .../__scheduled?cron=...`, which is
+  a `wrangler dev` affordance only — on a deployed Worker that path returns 404
+  (verified against a live deploy), so anyone following it concluded their
+  install was broken. Replaced with `wrangler tail` and an explanation that a
+  healthy tick logs nothing.
+- The `wrangler kv key get` example used the old argument order and an
+  `--namespace-id` placeholder to paste; it now uses
+  `state --binding KILL_SWITCH_STATE --remote`, which reads the id from
+  `wrangler.toml`. It also documented the healthy result as `null`, when current
+  wrangler exits with a `404: Not Found` — now called out as normal, since the
+  `state` key exists only after a kill or restore.
+- The "How it works" flow still described the pre-`billingCycleDay` behaviour
+  ("not the 1st of a new month"), contradicting the rest of the README.
+- The testing instructions now say to copy `src/config.example.ts` first, which
+  a fresh clone needs before `pnpm test`.
 
 - **The documented API-token permissions omitted the one that gates every
   metric.** `pnpm run validate` listed only the WAF/Workers/Pages permissions
