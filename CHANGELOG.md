@@ -14,37 +14,16 @@ All notable changes to this project are documented here.  Format follows [Keep a
   healthy tick logs nothing at all. Includes a real (anonymised) `wrangler tail`
   capture from a healthy install, so the expected output is something you can
   compare against rather than infer — contributed from a live deploy.
-
-### Fixed
-
-- **The README's verification step told you to do something that cannot work.**
-  It suggested triggering a tick with `curl .../__scheduled?cron=...`, which is
-  a `wrangler dev` affordance only — on a deployed Worker that path returns 404
-  (verified against a live deploy), so anyone following it concluded their
-  install was broken. Replaced with `wrangler tail` and an explanation that a
-  healthy tick logs nothing.
-- The `wrangler kv key get` example used the old argument order and an
-  `--namespace-id` placeholder to paste; it now uses
-  `state --binding KILL_SWITCH_STATE --remote`, which reads the id from
-  `wrangler.toml`. It also documented the healthy result as `null`, when current
-  wrangler exits with a `404: Not Found` — now called out as normal, since the
-  `state` key exists only after a kill or restore.
-- The "How it works" flow still described the pre-`billingCycleDay` behaviour
-  ("not the 1st of a new month"), contradicting the rest of the README.
-- The testing instructions now say to copy `src/config.example.ts` first, which
-  a fresh clone needs before `pnpm test`.
-
-- **The documented API-token permissions omitted the one that gates every
-  metric.** `pnpm run validate` listed only the WAF/Workers/Pages permissions
-  for your scope, and the README stated outright that "the token does not need
-  explicit read permissions for analytics". Both were wrong: every metric reads
-  the account-scoped GraphQL Analytics API (`viewer { accounts { ... } }`),
-  which requires `Account -> Account Analytics: Read`. A token built by
-  following the old docs returns 403 on every query, so no breach is ever
-  detected and the kill switch sits there looking deployed while doing nothing.
-  The validator now always lists it first, whatever the scope, and the README
-  documents it as unconditional. Found while creating a token for a real
-  deploy.
+- **Linting and formatting**: `pnpm lint` (oxlint with type-aware rules + a Prettier check) and `pnpm format`, both wired into CI. oxlint and Prettier were chosen over ESLint for their near-zero dependency footprint, in keeping with the project's supply-chain posture. The type-aware `no-floating-promises` / `no-misused-promises` pass found no defects, which is a useful signal for a codebase this promise-heavy.
+- `test/restore.test.ts`, covering the restore path that had none. Its first case is the one every `scope: 'none'` account takes — a killed state with no WAF rule recorded — which must count as fully restored; reporting a partial failure there would make `/restore` return 502 forever and auto-reset bail, leaving the account permanently killed.
+- Tests for the previously uncovered modules: `src/util/retry.ts`, `src/util/cf-api.ts`, `src/graphql/client.ts`, `src/actions/purge-d1.ts` and `src/actions/email.ts` (`test/util.test.ts`). The email deadlock above was found this way.
+- `.gitattributes` normalising text files to LF and pinning `*.sh` to `eol=lf`. Without it a Windows clone with `core.autocrlf=true` gets a CRLF shebang in `setup.sh`, which fails with `bad interpreter: /usr/bin/env bash^M`.
+- A **Known limitations** section in `SECURITY.md` recording the soft `/restore` rate limit, the `workers.dev`-only scope of `blocking.workers`, and the free-plan subrequest ceiling — each previously implicit.
+- **`billingCycleDay` config option (1-31, default `1`).** Cloudflare invoices from the day the account was created, not the 1st, so "monthly" quotas do not reset on the 1st for most accounts. This day now anchors both the auto-reset and every per-cycle metric window (R2 Class A/B operations, and the KV/R2/D1 storage ceilings). Days 29-31 fall back to the last day of shorter months. `billingCycleDay: 1` reproduces the previous calendar-month behaviour exactly. Validated pre-deploy and prompted for by both setup scripts.
+- `test/setup-scripts.test.ts` runs each of the setup scripts' `config.ts` regex anchors against the real `src/config.ts`. The scripts rewrite that file by regex, so a renamed field previously made the substitution silently no-op and drop the operator's answers.
+- Pre-deploy config validation (`pnpm run validate`, run automatically by `pnpm run deploy` and the setup scripts). Cross-checks `src/config.ts` against `wrangler.toml` and reports concrete fixes: placeholder IDs, empty zone ID with `scope: 'zone'`, active `[[send_email]]` with placeholder address, `scope: 'none'` with no blocking configured, purge targets without matching bindings, `purgeAt` below `blockAt`, and the API-token permissions each configuration needs.
+- The setup scripts (`setup.ps1` / `setup.sh`) now offer `scope: 'none'` and rewrite `config.ts` with regex anchors, so re-running setup works on an already-customised config.
+- New `scope: 'none'` option: deploys no WAF rule and relies entirely on `blocking.workers` / `blocking.pages`. For accounts with no domain/zone (workers.dev / pages.dev only), where there is nothing for a WAF rule to attach to. Previously a failing WAF deploy (e.g. empty `CLOUDFLARE_ZONE_ID`) aborted the whole kill, so Workers/Pages were never disabled either.
 
 ### Changed
 
@@ -80,22 +59,6 @@ All notable changes to this project are documented here.  Format follows [Keep a
   run — the file it guards is not the file setup rewrites — so the caveat about
   that in `CONTRIBUTING.md` is gone. `test/setup-scripts.test.ts` checks its
   anchors against the example for the same reason.
-
-### Added
-
-- **Linting and formatting**: `pnpm lint` (oxlint with type-aware rules + a Prettier check) and `pnpm format`, both wired into CI. oxlint and Prettier were chosen over ESLint for their near-zero dependency footprint, in keeping with the project's supply-chain posture. The type-aware `no-floating-promises` / `no-misused-promises` pass found no defects, which is a useful signal for a codebase this promise-heavy.
-- `test/restore.test.ts`, covering the restore path that had none. Its first case is the one every `scope: 'none'` account takes — a killed state with no WAF rule recorded — which must count as fully restored; reporting a partial failure there would make `/restore` return 502 forever and auto-reset bail, leaving the account permanently killed.
-- Tests for the previously uncovered modules: `src/util/retry.ts`, `src/util/cf-api.ts`, `src/graphql/client.ts`, `src/actions/purge-d1.ts` and `src/actions/email.ts` (`test/util.test.ts`). The email deadlock above was found this way.
-- `.gitattributes` normalising text files to LF and pinning `*.sh` to `eol=lf`. Without it a Windows clone with `core.autocrlf=true` gets a CRLF shebang in `setup.sh`, which fails with `bad interpreter: /usr/bin/env bash^M`.
-- A **Known limitations** section in `SECURITY.md` recording the soft `/restore` rate limit, the `workers.dev`-only scope of `blocking.workers`, and the free-plan subrequest ceiling — each previously implicit.
-- **`billingCycleDay` config option (1-31, default `1`).** Cloudflare invoices from the day the account was created, not the 1st, so "monthly" quotas do not reset on the 1st for most accounts. This day now anchors both the auto-reset and every per-cycle metric window (R2 Class A/B operations, and the KV/R2/D1 storage ceilings). Days 29-31 fall back to the last day of shorter months. `billingCycleDay: 1` reproduces the previous calendar-month behaviour exactly. Validated pre-deploy and prompted for by both setup scripts.
-- `test/setup-scripts.test.ts` runs each of the setup scripts' `config.ts` regex anchors against the real `src/config.ts`. The scripts rewrite that file by regex, so a renamed field previously made the substitution silently no-op and drop the operator's answers.
-- Pre-deploy config validation (`pnpm run validate`, run automatically by `pnpm run deploy` and the setup scripts). Cross-checks `src/config.ts` against `wrangler.toml` and reports concrete fixes: placeholder IDs, empty zone ID with `scope: 'zone'`, active `[[send_email]]` with placeholder address, `scope: 'none'` with no blocking configured, purge targets without matching bindings, `purgeAt` below `blockAt`, and the API-token permissions each configuration needs.
-- The setup scripts (`setup.ps1` / `setup.sh`) now offer `scope: 'none'` and rewrite `config.ts` with regex anchors, so re-running setup works on an already-customised config.
-- New `scope: 'none'` option: deploys no WAF rule and relies entirely on `blocking.workers` / `blocking.pages`. For accounts with no domain/zone (workers.dev / pages.dev only), where there is nothing for a WAF rule to attach to. Previously a failing WAF deploy (e.g. empty `CLOUDFLARE_ZONE_ID`) aborted the whole kill, so Workers/Pages were never disabled either.
-
-### Changed
-
 - R2's storage query window widened from 24h to 48h, matching KV's and D1's. If R2 snapshots less often than daily, the narrower window could return no rows and make `sumPerEntityMax` throw on every tick for any account with R2 activity; a gauge reads the same either way.
 - Byte values in alert emails use binary units (`GiB`/`MiB`/`KiB`). The configured limits are binary — Cloudflare's "1 GB" KV allowance is 1,073,741,824 bytes — so dividing by 1e9 rendered the limit itself as "1.07 GB", which read like it had already been exceeded.
 - The setup scripts JSON-escape every operator-supplied value they write into `src/config.ts` and `wrangler.toml`. An apostrophe in a Pages project name or a quote in an email address previously produced a file that would not parse. JSON string syntax is a subset of both TypeScript's and TOML's basic strings, so one escaper covers both.
@@ -118,6 +81,34 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Fixed
 
+- **The README's verification step told you to do something that cannot work.**
+  It suggested triggering a tick with `curl .../__scheduled?cron=...`, which is
+  a `wrangler dev` affordance only — on a deployed Worker that path returns 404
+  (verified against a live deploy), so anyone following it concluded their
+  install was broken. Replaced with `wrangler tail` and an explanation that a
+  healthy tick logs nothing.
+- The `wrangler kv key get` example used the old argument order and an
+  `--namespace-id` placeholder to paste; it now uses
+  `state --binding KILL_SWITCH_STATE --remote`, which reads the id from
+  `wrangler.toml`. It also documented the healthy result as `null`, when current
+  wrangler exits with a `404: Not Found` — now called out as normal, since the
+  `state` key exists only after a kill or restore.
+- The "How it works" flow still described the pre-`billingCycleDay` behaviour
+  ("not the 1st of a new month"), contradicting the rest of the README.
+- The testing instructions now say to copy `src/config.example.ts` first, which
+  a fresh clone needs before `pnpm test`.
+
+- **The documented API-token permissions omitted the one that gates every
+  metric.** `pnpm run validate` listed only the WAF/Workers/Pages permissions
+  for your scope, and the README stated outright that "the token does not need
+  explicit read permissions for analytics". Both were wrong: every metric reads
+  the account-scoped GraphQL Analytics API (`viewer { accounts { ... } }`),
+  which requires `Account -> Account Analytics: Read`. A token built by
+  following the old docs returns 403 on every query, so no breach is ever
+  detected and the kill switch sits there looking deployed while doing nothing.
+  The validator now always lists it first, whatever the scope, and the README
+  documents it as unconditional. Found while creating a token for a real
+  deploy.
 - **`pnpm run validate` passed a config whose zone ID could not possibly work.** The only check on `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID` and the KV namespace id was "non-empty and not containing REPLACE_ME", so a truncated paste or a stand-in word was reported as `Config check passed` — and then failed at the moment the kill fired, which is the one moment nothing may fail. With `scope: 'zone'` and a bad zone ID the WAF call fails, and with `blocking.workers`/`pages` at their empty defaults the kill switch takes no action at all. All three ids are now checked against the real Cloudflare shape (32 lowercase hex characters). Found by running the validator against a real config that had the word `none` pasted into the zone ID field.
 - Test fixtures in `test/validate.test.ts` are overridden through a `withKey` helper that throws when the key is absent, instead of literal `.replace()` calls. One of those had already gone stale and was silently matching nothing, leaving its test asserting against an unmodified fixture — the same silent-no-op class as the setup-script anchors.
 - **Alert emails deadlocked instead of sending.** `sendAlert` wrote the message into a `TransformStream` and awaited `writer.close()`, which does not resolve until something reads the readable end — and the only reader is the `SEND_EMAIL.send()` call on the next line, which cannot start until that await returns. The alert hung for the Worker's whole time limit, so the operator was never told the kill had fired. The message body is now built as a `ReadableStream` directly. Found by adding the first test for this module.
