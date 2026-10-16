@@ -1,5 +1,24 @@
 import type { Env } from "./configuration.ts";
 import { Engine } from "./engine.ts";
+export function authorized(header: string | null, secret: string): boolean {
+  if (
+    typeof secret !== "string" ||
+    secret.length < 32 ||
+    secret.length > 512 ||
+    header?.length !== secret.length + 7
+  )
+    return false;
+  const encode = new TextEncoder();
+  const supplied = encode.encode(header),
+    expected = encode.encode(`Bearer ${secret}`);
+  const subtle = crypto.subtle as SubtleCrypto & {
+    timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean;
+  };
+  return (
+    supplied.byteLength === expected.byteLength &&
+    subtle.timingSafeEqual(supplied, expected)
+  );
+}
 const reply = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
@@ -19,9 +38,23 @@ export class Guard {
     const run = this.queue.then(async () => {
       try {
         const path = new URL(request.url).pathname;
-        if (path === "/tick") return reply(await this.engine.tick());
-        if (path === "/cutoff")
-          return reply(await this.engine.tick(Date.now(), true));
+        if (path === "/tick" || path === "/cutoff") {
+          const s = await this.engine.tick(Date.now(), path === "/cutoff");
+          return reply(
+            s,
+            s.errors.length
+              ? 503
+              : path === "/cutoff" && !s.latched
+                ? 409
+                : 200,
+          );
+        }
+        if (path === "/recovery-check")
+          return reply(
+            await this.engine.recoveryCheck(
+              request.headers.get("X-Confirm-Cutoff") ?? "",
+            ),
+          );
         if (path === "/rearm")
           return reply(
             await this.engine.rearm(
@@ -30,10 +63,18 @@ export class Guard {
           );
         const s = await this.engine.state();
         const stale =
-          !s.lastCheck || Date.now() - Date.parse(s.lastCheck) > 20 * 60000;
+          !s.lastCheck ||
+          Date.now() < Date.parse(s.lastCheck) ||
+          Date.now() - Date.parse(s.lastCheck) > 20 * 60000;
         return reply(
-          { ...s, heartbeatStale: stale },
-          stale || s.errors.length || s.latched ? 503 : 200,
+          {
+            ...s,
+            heartbeatStale: stale,
+            enforcementEnabled: s.config?.enabled === true,
+          },
+          stale || s.errors.length || s.latched || !s.config?.enabled
+            ? 503
+            : 200,
         );
       } catch {
         return reply(
@@ -51,16 +92,14 @@ export class Guard {
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (
-      !env.ADMIN_SECRET ||
-      request.headers.get("Authorization") !== `Bearer ${env.ADMIN_SECRET}`
-    )
-      return new Response("Not found", { status: 404 });
     const path = new URL(request.url).pathname;
     if (!(
       (request.method === "GET" && path === "/status") ||
-      (request.method === "POST" && ["/cutoff", "/rearm"].includes(path))
+      (request.method === "POST" &&
+        ["/cutoff", "/rearm", "/recovery-check"].includes(path))
     ))
+      return new Response("Not found", { status: 404 });
+    if (!authorized(request.headers.get("Authorization"), env.ADMIN_SECRET))
       return new Response("Not found", { status: 404 });
     return env.GUARD.get(env.GUARD.idFromName("ferrecar-v1")).fetch(request);
   },

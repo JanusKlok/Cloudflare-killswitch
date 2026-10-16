@@ -140,7 +140,7 @@ no deployment script, GitHub deployment workflow or Codex recurring automation.
    npx --no-install wrangler secret put ADMIN_SECRET --config wrangler.toml
    ```
 
-   Generate a long random admin secret in the customer's password manager.
+   Generate a random admin secret of 32–512 characters in the customer's password manager. Short secrets are refused; authentication uses Workers' timing-safe buffer comparison.
    First-time secret creation can require a draft Worker; use the customer
    dashboard or Wrangler's documented first-deployment flow. Never reuse
    Ferrecar's deployment token as the monitor token.
@@ -149,7 +149,7 @@ no deployment script, GitHub deployment workflow or Codex recurring automation.
    `npx --no-install wrangler deploy --config wrangler.toml`. This creates the
    small SQLite Durable Object used for serialized control and persistent latch.
    Check that cron is `* * * * *` (UTC, configurable). Confirm the script name
-   matches `CONFIG.self`, keep its DO binding/class/migration/instance name stable,
+   is `ferrecar-budget-guard` as required by `CONFIG.self`, keep its DO binding/class/migration/instance name stable,
    and do not delete its storage during upgrades.
 8. Run in observe mode until a recent monitor canary is visible in analytics
    (initial checks may report missing metrics), storage samples are available,
@@ -168,11 +168,11 @@ no deployment script, GitHub deployment workflow or Codex recurring automation.
 Authenticate admin requests with `Authorization: Bearer <ADMIN_SECRET>`. Avoid
 putting this secret in shell history, screenshots or support messages.
 
-| Request                                                 | Behavior                                                                                                                                                                                       |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /status`                                           | Saved state, estimate, original recovery snapshot, errors and heartbeat age. HTTP 503 for cutoff/errors/stale persisted heartbeat. Healthy state checkpoints every 15 minutes; stale after 20. |
-| `POST /cutoff`                                          | Refresh inventory and request manual cutoff; obeys `enabled`. Writes durable intent before any mutation.                                                                                       |
-| `POST /rearm` with `X-Confirm-Cutoff: <exact cutoffAt>` | Checks manual restoration, fresh metrics and cost below warning, archives prior snapshot, clears only guard latch. It makes no production API mutations.                                       |
+| Request                                                 | Behavior                                                                                                                                                                                                                             |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /status`                                           | Saved state, estimate, original recovery snapshot, errors and heartbeat age. HTTP 503 for observe mode, cutoff, errors or stale heartbeat. Inspect `enforcementEnabled`. Healthy state checkpoints every 15 minutes; stale after 20. |
+| `POST /cutoff`                                          | Manual cutoff skips analytics/inventory, obeys `enabled`, and persists intent before mutation. Disabled healthy enforcement returns 409; partial failure returns 503.                                                                |
+| `POST /rearm` with `X-Confirm-Cutoff: <exact cutoffAt>` | Checks manual restoration, fresh metrics and cost below warning, archives prior snapshot, clears only guard latch. It makes no production API mutations.                                                                             |
 
 After cutoff, every cron verifies the WAF rule, workers.dev/previews and empty
 cron list and repairs drift. Partial failures remain visible and retry. It never
@@ -181,17 +181,31 @@ WebSockets, running jobs and already-triggered work are not forcibly terminated.
 API verification establishes the returned control-plane settings; it is not an
 end-to-end billing or edge-propagation test.
 
-For recovery, download `/status` and keep it privately. Pause the **guard's** cron
-temporarily in the customer dashboard, preserving the latch and DO. Investigate
-the reason, stop runaway producers, resolve every coverage gap, rotate compromised
-tokens and update the verified billing interval if needed. In the customer
+For recovery, download `/status` and keep it privately. Investigate the reason,
+stop runaway producers, resolve every coverage gap, rotate compromised tokens
+and update the verified billing interval if needed. **First** call
+`POST /recovery-check` with `X-Confirm-Cutoff: <exact cutoffAt>` while the
+application remains stopped. This read-only endpoint changes neither the latch
+nor production settings. It requires enabled enforcement, unchanged original
+control scope, valid complete snapshots, coverage and fresh cost below warning.
+Known estimated charges cannot decrease within the same product billing period,
+so missing/lower metrics cannot make a spend cutoff eligible for recovery.
+Do not change billing timestamps just to bypass the check.
+
+Once readiness passes, pause the **guard's** cron temporarily in the customer
+dashboard, preserving its latch/DO, and allow any in-flight check to finish.
+Repeat readiness immediately before restoring production. In the customer
 dashboard remove only this guard's WAF rule (match its stable ref/host expression),
 restore the original `snapshot.subdomain` booleans and exact `snapshot.schedules`.
 Leave settings originally disabled disabled. This restoration itself reopens
 production, so it is an explicit customer action. POST `/rearm` with the recorded
-timestamp while cron remains paused; then restore the guard cron. Rearm refuses
-if settings differ, coverage is incomplete, analytics fail, or cost remains at
-or above warning. Repeating rearm after successful rearm is rejected safely.
+timestamp while cron remains paused; then restore the guard cron. If rearm fails,
+**resume the guard cron immediately** so the retained latch re-applies cutoff;
+do not leave production reopened with monitoring paused. Rearm refuses disabled
+enforcement, changed account/Worker/guard/zone/host scope, incomplete coverage,
+invalid or expired configuration, failed analytics, and cost at or above warning.
+Hostname ordering is harmless. Rearm verifies the original settings and never
+writes production settings. Repeated rearm after success is rejected safely.
 
 If the admin endpoint or DO is unavailable, use the recorded snapshot and customer
 dashboard; repair monitoring before clearing state. Never delete the namespace or

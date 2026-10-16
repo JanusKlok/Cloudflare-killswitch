@@ -1,7 +1,18 @@
 import { api, bounded, type Api } from "./api.ts";
-import { configuration, type Config, type Env } from "./configuration.ts";
-import { inventory, enforce, restored, type Snapshot } from "./control.ts";
-import { estimate } from "./cost.ts";
+import {
+  configuration,
+  storedConfiguration,
+  type Config,
+  type Env,
+} from "./configuration.ts";
+import {
+  inventory,
+  enforce,
+  restored,
+  validateSnapshot,
+  type Snapshot,
+} from "./control.ts";
+import { estimate, retainEstimate, validateEstimate } from "./cost.ts";
 import { metrics } from "./metrics.ts";
 export interface State {
   version: 1;
@@ -28,6 +39,12 @@ export const initial = (): State => ({
   errors: [],
   gaps: [],
 });
+const controlScope = (c: Config) =>
+  JSON.stringify(
+    c.zones
+      .map((z) => ({ id: z.id, hosts: [...z.hosts].sort() }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  );
 export class Engine {
   constructor(
     private store: Store,
@@ -37,17 +54,56 @@ export class Engine {
   ) {}
   async state(): Promise<State> {
     const s = await this.store.get<State>("state");
-    if (s && s.version !== 1)
-      throw Error("state version requires operator migration");
+    if (s !== undefined) {
+      if (
+        !s ||
+        typeof s !== "object" ||
+        s.version !== 1 ||
+        typeof s.latched !== "boolean" ||
+        !Array.isArray(s.errors) ||
+        !Array.isArray(s.gaps) ||
+        [...s.errors, ...s.gaps].some((x) => typeof x !== "string")
+      )
+        throw Error("invalid durable state");
+      if (s.config) s.config = storedConfiguration(s.config);
+      if (s.cost) validateEstimate(s.cost);
+      if (s.snapshot) validateSnapshot(s.snapshot);
+      for (const date of [s.lastCheck, s.lastGood, s.lastInventory, s.cutoffAt])
+        if (
+          date !== undefined &&
+          (typeof date !== "string" || !Number.isFinite(Date.parse(date)))
+        )
+          throw Error("invalid state timestamp");
+      if (
+        s.latched &&
+        (!s.config?.enabled ||
+          !s.snapshot ||
+          !s.cutoffAt ||
+          typeof s.reason !== "string")
+      )
+        throw Error("cutoff recovery state missing");
+    }
     return s ?? initial();
   }
   async tick(now = Date.now(), manual = false): Promise<State> {
-    const deadline = Date.now() + 45_000;
-    const read = bounded(this.read, deadline),
-      control = bounded(this.control, deadline);
+    const read = bounded(this.read, Date.now() + 15_000);
     const s = await this.state();
-    const save = () => this.store.put("state", s);
+    let pending = Promise.resolve();
+    const save = () => {
+      const record = structuredClone(s);
+      const write = pending.then(() => this.store.put("state", record));
+      pending = write.catch(() => {});
+      return write;
+    };
+    const shutdown = () =>
+      enforce(
+        bounded(this.control, Date.now() + 45_000),
+        s.config!,
+        s.snapshot!,
+        save,
+      );
     const previous = JSON.stringify(s);
+    const prior = { config: s.config, cost: s.cost };
     s.lastCheck = new Date(now).toISOString();
     s.errors = [];
     // Latch precedes config parsing: disabled enforcement or expired/replaced
@@ -55,9 +111,14 @@ export class Engine {
     if (s.latched) {
       if (!s.config || !s.snapshot)
         throw Error("cutoff recovery state missing");
-      s.errors = await enforce(control, s.config, s.snapshot, save);
+      s.errors = await shutdown();
       // Inspect drift even while shut down; unsupported new triggers stay visible.
-      const live = await inventory(read, s.config);
+      const live = await inventory(
+        bounded(this.read, Date.now() + 15_000),
+        s.config,
+        true,
+      );
+      s.lastInventory = s.lastCheck;
       s.gaps = [
         ...live.issues,
         "Account total, ongoing storage and guard overhead remain best-effort estimates.",
@@ -81,13 +142,31 @@ export class Engine {
         delete s.snapshot.subdomain;
         delete s.snapshot.schedules;
         await save();
-        s.errors.push(...(await enforce(control, s.config, s.snapshot, save)));
+        s.errors.push(...(await shutdown()));
       }
       await save();
       return s;
     }
     const configChanged = JSON.stringify(s.config) !== JSON.stringify(c);
     s.config = c;
+    if (manual && c.enabled) {
+      s.latched = true;
+      s.reason = "operator cutoff";
+      s.cutoffAt = s.lastCheck;
+      s.snapshot = {
+        routes: s.snapshot?.routes ?? [],
+        domains: s.snapshot?.domains ?? [],
+        issues: s.snapshot?.issues ?? [],
+      };
+      s.gaps = [
+        ...s.gaps,
+        "Manual cutoff bypassed analytics/inventory; coverage will refresh on the next cron.",
+      ];
+      await save();
+      s.errors = await shutdown();
+      await save();
+      return s;
+    }
     // Inventory every 15 minutes; cutoff enforcement itself checks every minute.
     if (
       configChanged ||
@@ -103,7 +182,7 @@ export class Engine {
     try {
       const m = await metrics(read, c, now);
       s.gaps.push(...m.gaps);
-      s.cost = estimate(m.usage, c.fixed, c.reserve);
+      s.cost = this.estimate(m.usage, c, prior);
       s.lastGood = s.lastCheck;
       s.warning = s.cost.microUsd >= c.warning;
     } catch {
@@ -128,7 +207,7 @@ export class Engine {
       delete s.snapshot.schedules;
       // Durable intent is committed before ALL shutdown mutations.
       await save();
-      s.errors.push(...(await enforce(control, c, s.snapshot, save)));
+      s.errors.push(...(await shutdown()));
     } else if (reason) s.reason = `OBSERVE ONLY: would cut off (${reason})`;
     else delete s.reason;
     // One compact heartbeat every 15m while healthy; transition/errors write now.
@@ -146,22 +225,17 @@ export class Engine {
   }
   async rearm(confirm: string, now = Date.now()): Promise<State> {
     const s = await this.state();
-    const c = configuration(this.env, now);
     if (!s.latched || confirm !== s.cutoffAt || !s.config || !s.snapshot)
       throw Error("cutoff timestamp confirmation required");
     if (
-      c.account !== s.config.account ||
-      c.worker !== s.config.worker ||
-      c.self !== s.config.self ||
-      !(await restored(this.read, s.config, s.snapshot))
+      !(await restored(
+        bounded(this.read, Date.now() + 15_000),
+        s.config,
+        s.snapshot,
+      ))
     )
       throw Error("restore original state manually before rearming");
-    const live = await inventory(this.read, c);
-    if (live.issues.length) throw Error("coverage unresolved");
-    const m = await metrics(this.read, c, now);
-    const cost = estimate(m.usage, c.fixed, c.reserve);
-    if (cost.microUsd >= c.warning)
-      throw Error("cost remains at or above warning");
+    const { c, live, m, cost } = await this.recovery(confirm, now);
     // No production mutation on this path. Keep original recovery evidence.
     const archive = { ...s };
     await this.store.put("previous-cutoff", archive);
@@ -169,11 +243,73 @@ export class Engine {
       ...initial(),
       config: c,
       snapshot: live,
+      lastCheck: new Date(now).toISOString(),
+      lastGood: new Date(now).toISOString(),
+      warning: false,
       lastInventory: new Date(now).toISOString(),
       cost,
       gaps: m.gaps,
     };
     await this.store.put("state", active);
     return active;
+  }
+  private async recovery(confirm: string, now: number) {
+    const s = await this.state(),
+      c = configuration(this.env, now);
+    if (
+      !s.latched ||
+      !s.config ||
+      !s.snapshot ||
+      !s.cutoffAt ||
+      confirm !== s.cutoffAt
+    )
+      throw Error("cutoff timestamp confirmation required");
+    if (
+      !c.enabled ||
+      c.account !== s.config.account ||
+      c.worker !== s.config.worker ||
+      c.self !== s.config.self ||
+      controlScope(c) !== controlScope(s.config)
+    )
+      throw Error("original scope and enabled enforcement required");
+    validateSnapshot(s.snapshot);
+    if (!s.snapshot.subdomain || !s.snapshot.schedules)
+      throw Error("recovery snapshot incomplete");
+    if (c.httpOnly && s.snapshot.schedules.length)
+      throw Error("restored cron violates HTTP-only CPU policy");
+    const read = bounded(this.read, Date.now() + 15_000);
+    const live = await inventory(read, c, true);
+    if (live.issues.length) throw Error("coverage unresolved");
+    const m = await metrics(read, c, now),
+      cost = this.estimate(m.usage, c, s);
+    if (cost.microUsd >= c.warning)
+      throw Error("cost remains at or above warning");
+    return { s, c, live, m, cost };
+  }
+  async recoveryCheck(confirm: string, now = Date.now()) {
+    const { s, m, cost } = await this.recovery(confirm, now);
+    return {
+      ready: true,
+      cutoffAt: s.cutoffAt,
+      asOf: new Date(now).toISOString(),
+      cost,
+      gaps: m.gaps,
+    };
+  }
+  private estimate(
+    usage: Parameters<typeof estimate>[0],
+    c: Config,
+    prior: Pick<State, "config" | "cost">,
+  ) {
+    const same = {} as Record<"workers" | "d1" | "r2", boolean>;
+    for (const p of ["workers", "d1", "r2"] as const)
+      same[p] =
+        JSON.stringify(c.windows[p]) ===
+        JSON.stringify(prior.config?.windows[p]);
+    return retainEstimate(
+      estimate(usage, c.fixed, c.reserve),
+      prior.cost,
+      same,
+    );
   }
 }

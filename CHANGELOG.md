@@ -4,6 +4,9 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ## [Unreleased]
 
+- Fix cutoff starvation with separate analytics/shutdown budgets, bounded independent actions, ordered durable snapshots, and manual cutoff that bypasses analytics.
+- Preserve known estimated charges per billing interval; add read-only recovery readiness, original-scope/enforcement checks, strict response/state/settings validation, visible failure statuses, timing-safe authentication and regression tests. Enforcement remains disabled; no deployment.
+
 - Add a default-disabled Ferrecar cost guard with account-period request/CPU, D1 row/storage and R2 Standard estimates; persistent verified cutoff/retry, manual recovery, no data purge or automatic reactivation, and documented coverage/deployment limits.
 - Replace generic setup/deployment scripts and tests with a dependency-free runtime, failure-path tests, locked tooling, disabled install scripts, and a 72-hour release-age/integrity gate for every locked dependency.
 

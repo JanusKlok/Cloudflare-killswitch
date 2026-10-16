@@ -63,7 +63,7 @@ test("redirects forbidden, only Cloudflare API origin, credentials stay in heade
       assert.equal(url, "https://api.cloudflare.com/client/v4/example");
       assert.equal(init.redirect, "error");
       assert.equal(init.headers.Authorization, "Bearer test-only");
-      return Response.json({ result: [] });
+      return Response.json({ success: true, result: [] });
     }),
   );
   await call("/example");

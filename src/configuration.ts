@@ -24,8 +24,38 @@ export interface Env {
   ADMIN_SECRET: string;
   GUARD: DurableObjectNamespace;
 }
-export function configuration(env: Env, now = Date.now()): Config {
-  const c: Config = JSON.parse(env.CONFIG);
+function validate(value: unknown, now?: number): Config {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw Error("config shape");
+  const c = value as Config;
+  const keys = new Set([
+    "account",
+    "worker",
+    "self",
+    "d1",
+    "bucket",
+    "enabled",
+    "warning",
+    "cutoff",
+    "fixed",
+    "reserve",
+    "windows",
+    "zones",
+    "cpuCeilingMs",
+    "reviewedUntil",
+    "httpOnly",
+    "d1StorageFloor",
+    "r2StorageFloor",
+  ]);
+  if (Object.keys(c).some((k) => !keys.has(k)))
+    throw Error("unknown config property");
+  if (
+    !c.windows ||
+    typeof c.windows !== "object" ||
+    Object.keys(c.windows).length !== 3 ||
+    Object.keys(c.windows).some((k) => !["workers", "d1", "r2"].includes(k))
+  )
+    throw Error("config windows");
   for (const k of ["account", "worker", "self", "d1", "bucket"] as const)
     if (
       typeof c[k] !== "string" ||
@@ -35,7 +65,7 @@ export function configuration(env: Env, now = Date.now()): Config {
       throw Error(`config ${k}`);
   if (
     c.worker !== "ferrecar-platform" ||
-    c.self === c.worker ||
+    c.self !== "ferrecar-budget-guard" ||
     c.bucket !== "ferrecar-uploads"
   )
     throw Error("scope must be Ferrecar, excluding guard");
@@ -62,7 +92,8 @@ export function configuration(env: Env, now = Date.now()): Config {
     throw Error("config policy");
   if (
     !Number.isFinite(Date.parse(c.reviewedUntil)) ||
-    Date.parse(c.reviewedUntil) <= now
+    typeof c.reviewedUntil !== "string" ||
+    (now !== undefined && Date.parse(c.reviewedUntil) <= now)
   )
     throw Error("coverage review expired");
   for (const name of ["workers", "d1", "r2"] as const) {
@@ -72,8 +103,11 @@ export function configuration(env: Env, now = Date.now()): Config {
     if (
       !Number.isFinite(a) ||
       !Number.isFinite(b) ||
-      a > now ||
-      b <= now ||
+      typeof w?.start !== "string" ||
+      typeof w?.end !== "string" ||
+      Object.keys(w).length !== 2 ||
+      b <= a ||
+      (now !== undefined && (a > now || b <= now)) ||
       b - a > 31 * 86400000
     )
       throw Error(`billing window ${name} requires renewal`);
@@ -84,18 +118,39 @@ export function configuration(env: Env, now = Date.now()): Config {
   }
   if (!Array.isArray(c.zones) || c.zones.length > 3)
     throw Error("config zones");
-  for (const z of c.zones)
+  const ids = new Set<string>(),
+    hosts = new Set<string>();
+  for (const z of c.zones) {
     if (
+      !z ||
+      Object.keys(z).length !== 2 ||
       !/^[a-f0-9]{32}$/.test(z.id) ||
+      ids.has(z.id) ||
+      !Array.isArray(z.hosts) ||
       !z.hosts.length ||
       z.hosts.length > 10 ||
       z.hosts.some(
         (h) =>
-          !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(h) ||
-          h.includes("..") ||
+          typeof h !== "string" ||
+          h.length > 253 ||
+          hosts.has(h) ||
+          new Set(z.hosts).size !== z.hosts.length ||
+          !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(h) ||
           h.includes("workers.dev"),
       )
     )
       throw Error("exact zone hostnames required");
+    ids.add(z.id);
+    for (const h of z.hosts) hosts.add(h);
+  }
   return c;
 }
+export function configuration(env: Env, now = Date.now()): Config {
+  try {
+    return validate(JSON.parse(env.CONFIG), now);
+  } catch {
+    throw Error("invalid or expired configuration");
+  }
+}
+// Recorded cutoff scope must remain usable after its billing/review dates expire.
+export const storedConfiguration = (value: unknown) => validate(value);

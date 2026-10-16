@@ -70,3 +70,13 @@ The 72-hour delay allows time for reports but cannot prevent an older malicious
 release, compromised maintainer, registry compromise or previously unknown
 vulnerability. No exhaustive manual review of every transitive dependency or
 native binary was performed. No credentials were printed or committed.
+
+## Follow-up correctness/security review
+
+The same lockfile was rechecked after the final review fixes: all 117 locked
+versions passed the 72-hour age, source and integrity gate. The installed-package
+signature audit reported 43 verified signatures and 24 verified attestations;
+zero known vulnerabilities were reported. The original 117/78 full-tree result
+above is historical evidence for the unchanged lockfile, not a claim that every
+package is installed on every platform. No dependency versions changed.
+See [FINAL-REVIEW.md](FINAL-REVIEW.md) for the fixes and regression coverage.

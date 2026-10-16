@@ -132,12 +132,27 @@ Adaptive sampling can undercount and delayed updates can still evade detection.
 | Guard itself                                                          | Never a shutdown target; requests counted, overhead reserved                   | Same account/provider failure and attacks can disable or charge monitor |
 | Ferrecar redeployment                                                 | Persistent latch re-verifies/repairs cutoff every minute                       | No atomic pipeline interlock; separate approval required                |
 
-API operations are sequential with 5-second response/body timeout, at most one
-retry on 429/5xx for non-POST calls, 256 KiB response cap and a 45-second budget
-for starting calls. A final in-flight call can take up to 10 more seconds. One
-GraphQL request per healthy minute; inventory every 15 minutes or config change.
-State checkpoints every 15 healthy minutes and immediately on warnings/errors/
-cutoff transitions. Latched state reconciles each minute; there is no auto-reset.
+API calls have a 5-second response/body timeout, at most one retry on 429/5xx for
+non-POST calls and a 256 KiB response cap. Analytics/inventory preflight has a
+15-second budget for starting calls. Shutdown receives a fresh 45-second budget,
+independent of preflight, and starts at most five independent actions concurrently
+(three distinct zones, subdomain and cron). Calls within each action remain
+sequential. A final in-flight call can take up to 10 more seconds. A slow WAF
+cannot consume another action's turn. Manual cutoff skips analytics/inventory.
+Recovery reads are separately bounded; long failed checks can delay a later cron
+because the control object serializes requests. One GraphQL request per healthy
+minute; inventory every 15 minutes or config change. Healthy state checkpoints
+every 15 minutes; warnings/errors/cutoff transitions persist immediately. Latched
+state reconciles each minute; there is no automatic reset.
+
+Estimated charge line items retain their highest saved observed values within
+each product's billing interval, including during recovery. Each product's floor
+resets only when its verified configured interval changes. This does not make
+sampled analytics exact, or recover peaks missed before a checkpoint. Malformed
+durable state returns an error instead of being interpreted as unlatched; if the
+scope itself is lost/corrupt the guard cannot safely mutate unknown resources.
+Inventory requires a verified Workers Standard model and a readable WAF
+entrypoint for each zone, and refuses malformed CPU limits or recovery settings.
 
 ## Validation status
 

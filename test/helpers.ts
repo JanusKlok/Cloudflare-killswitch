@@ -137,6 +137,7 @@ export class Cloud {
       value = { schedules: this.schedules };
     } else if (p.endsWith("/settings"))
       value = {
+        usage_model: "standard",
         bindings: [
           { type: "d1" },
           { type: this.images ? "images" : "r2_bucket" },

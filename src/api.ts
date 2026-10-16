@@ -3,6 +3,11 @@ export type Api = <T>(
   body?: unknown,
   method?: string,
 ) => Promise<T>;
+export class ApiError extends Error {
+  constructor(public readonly status: number) {
+    super(`Cloudflare HTTP ${status}`);
+  }
+}
 export function bounded(call: Api, deadline: number): Api {
   return <T>(path: string, body?: unknown, method?: string) => {
     if (Date.now() >= deadline)
@@ -41,7 +46,10 @@ export function api(token: string, fetcher: typeof fetch = fetch): Api {
           await r.body?.cancel();
           continue;
         }
-        if (!r.ok) throw Error(`Cloudflare HTTP ${r.status}`);
+        if (!r.ok) {
+          await r.body?.cancel();
+          throw new ApiError(r.status);
+        }
         const reader = r.body?.getReader();
         if (!reader) throw Error("empty API response");
         const chunks: Uint8Array[] = [];
@@ -63,7 +71,13 @@ export function api(token: string, fetcher: typeof fetch = fetch): Api {
           offset += chunk.length;
         }
         const j = JSON.parse(new TextDecoder().decode(bytes));
-        if (j.success === false || j.errors?.length)
+        if (
+          !j ||
+          typeof j !== "object" ||
+          j.success === false ||
+          (j.errors != null && (!Array.isArray(j.errors) || j.errors.length)) ||
+          (path !== "/graphql" && j.success !== true)
+        )
           throw Error("Cloudflare response error");
         if (
           j.result_info &&

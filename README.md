@@ -45,7 +45,7 @@ availability and overhead are not independent or guaranteed. The default CPU
 ceiling is intentionally very conservative and may shut down after a few hundred
 app invocations. Read the setup guide before choosing a practical lower ceiling.
 
-`GET /status`, `POST /cutoff` and `POST /rearm` require the separate admin secret.
+`GET /status`, `POST /cutoff`, `POST /recovery-check` and `POST /rearm` require the separate admin secret (32–512 characters). Readiness must pass before an operator restores traffic. Known estimated charges retain their highest saved value within each product billing interval. Manual cutoff bypasses analytics, and independent shutdown actions cannot be starved by a slow WAF.
 Rearm verifies that an operator already restored the recorded settings; it does
 not reopen production itself. Keep the guard's Durable Object namespace/instance
 stable across releases. A Ferrecar deployment pipeline interlock is documented

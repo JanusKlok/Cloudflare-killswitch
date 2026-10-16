@@ -43,6 +43,53 @@ export function estimate(u: Usage, fixed: number, reserve: number) {
       "Workers Standard + D1 + R2 Standard estimate with reserves; NOT account invoice total",
   };
 }
+export type Estimate = ReturnType<typeof estimate>;
+const product = {
+  fixed: "any",
+  reserve: "any",
+  requests: "workers",
+  cpu: "workers",
+  d1Read: "d1",
+  d1Write: "d1",
+  d1Storage: "d1",
+  r2A: "r2",
+  r2B: "r2",
+  r2Storage: "r2",
+} as const;
+export function validateEstimate(e: Estimate): void {
+  if (
+    !e ||
+    !e.items ||
+    Object.keys(e.items).length !== Object.keys(product).length
+  )
+    throw Error("invalid saved estimate");
+  let total = 0n;
+  for (const key of Object.keys(product)) {
+    const n = e.items[key];
+    if (!Number.isSafeInteger(n) || n < 0) throw Error("invalid saved cost");
+    total += BigInt(n);
+  }
+  if (total > BigInt(Number.MAX_SAFE_INTEGER) || Number(total) !== e.microUsd)
+    throw Error("invalid saved total");
+}
+// A disappearing/sampled dataset must not erase already observed estimated
+// charges, including during recovery. Reset each product only at a verified
+// change of its billing interval; do not add the old and new estimates.
+export function retainEstimate(
+  next: Estimate,
+  previous: Estimate | undefined,
+  same: Record<"workers" | "d1" | "r2", boolean>,
+): Estimate {
+  if (!previous) return next;
+  validateEstimate(previous);
+  for (const [key, p] of Object.entries(product)) {
+    if (p === "any" ? Object.values(same).some(Boolean) : same[p])
+      next.items[key] = Math.max(next.items[key], previous.items[key]);
+  }
+  next.microUsd = Object.values(next.items).reduce((s, n) => s + n, 0);
+  validateEstimate(next);
+  return next;
+}
 const A = new Set(
   "ListBuckets PutBucket CreateBucket ListObjects ListObjectsV2 PutObject CopyObject CompleteMultipartUpload CreateMultipartUpload LifecycleStorageTierTransition ListMultipartUploads UploadPart UploadPartCopy ListParts PutBucketEncryption PutBucketCors PutBucketLifecycleConfiguration".split(
     " ",
