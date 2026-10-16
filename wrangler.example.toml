@@ -1,0 +1,57 @@
+name = "ferrecar-budget-guard"
+main = "src/index.ts"
+compatibility_date = "2026-08-31"
+workers_dev = true
+preview_urls = false
+
+[triggers]
+crons = ["* * * * *"]
+
+[limits]
+cpu_ms = 100
+
+# Errors and warnings are persisted in /status. Review logging cost before
+# enabling persistent provider logs; use an independent authenticated watchdog.
+[observability]
+enabled = false
+
+[[durable_objects.bindings]]
+name = "GUARD"
+class_name = "Guard"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Guard"]
+
+[vars]
+# Micro-US dollars; 1 USD = 1_000_000. All real identifiers stay in local config.
+# Exact UTC billing windows come from the customer's subscription, not guesses.
+# Placeholders deliberately prevent an operational configuration out of the box.
+CONFIG = '''
+{
+  "account": "REPLACE_ACCOUNT_ID",
+  "worker": "ferrecar-platform",
+  "self": "ferrecar-budget-guard",
+  "d1": "REPLACE_D1_ID",
+  "bucket": "ferrecar-uploads",
+  "enabled": false,
+  "warning": 10000000,
+  "cutoff": 15000000,
+  "fixed": 5000000,
+  "reserve": 1000000,
+  "cpuCeilingMs": 1800000,
+  "httpOnly": false,
+  "d1StorageFloor": 0,
+  "r2StorageFloor": 0,
+  "reviewedUntil": "REPLACE_REVIEW_EXPIRY_UTC",
+  "windows": {
+    "workers": { "start": "REPLACE_ACTUAL_UTC_START", "end": "REPLACE_ACTUAL_UTC_END" },
+    "d1": { "start": "REPLACE_ACTUAL_UTC_START", "end": "REPLACE_ACTUAL_UTC_END" },
+    "r2": { "start": "REPLACE_ACTUAL_UTC_START", "end": "REPLACE_ACTUAL_UTC_END" }
+  },
+  "zones": [{ "id": "REPLACE_ZONE_ID", "hosts": ["ferrecar.example.com"] }]
+}
+'''
+# Secrets, set interactively only after deployment approval:
+# ANALYTICS_TOKEN, CONTROL_TOKEN, ADMIN_SECRET
+# No D1 or R2 data bindings. No production deployment workflow.

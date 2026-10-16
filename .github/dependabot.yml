@@ -4,28 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # Match the supply-chain quarantine in .npmrc (minimum-release-age=10080):
-    # without this, Dependabot proposes versions younger than 7 days, pnpm
-    # refuses to resolve them, and the updater job fails.
+    # The explicit validation gate also checks every transitive/optional version.
     cooldown:
-      default-days: 7
+      default-days: 3
     open-pull-requests-limit: 5
     labels:
       - dependencies
     commit-message:
       prefix: deps
-
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: monthly
-    # Actions get the same 7-day quarantine as npm packages: a compromised
-    # release is usually pulled within hours, and Actions run with access to
-    # the workflow token.
-    cooldown:
-      default-days: 7
-    labels:
-      - dependencies
-      - github-actions
-    commit-message:
-      prefix: ci

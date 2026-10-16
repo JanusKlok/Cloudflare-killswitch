@@ -1,35 +1,28 @@
 {
-  "name": "cloudflare-killswitch",
-  "version": "2.0.0",
-  "description": "Cloudflare Worker that monitors free-tier usage every 5 minutes and automatically blocks all traffic when any limit is breached.",
-  "license": "MIT",
+  "name": "ferrecar-budget-guard",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
   "engines": {
-    "node": ">=22.0.0",
-    "pnpm": ">=10.26.0"
+    "node": ">=22"
   },
-  "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "dev": "wrangler dev",
-    "validate": "tsx scripts/validate-config.ts",
-    "deploy": "tsx scripts/validate-config.ts && wrangler deploy",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "lint": "oxlint --type-aware && prettier --check .",
-    "format": "prettier --write .",
-    "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p tsconfig.scripts.json",
-    "types": "wrangler types"
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=dist/worker.js",
+    "check": "npm run verify-dependencies && npm run typecheck && npm test && npm run build",
+    "dry-run": "wrangler deploy --dry-run --config wrangler.example.toml --outdir dist/wrangler",
+    "verify-dependencies": "node scripts/check-supply-chain.mjs && npm audit signatures && npm audit --audit-level=low",
+    "format": "prettier --write src test scripts docs README.md SECURITY.md CONTRIBUTING.md package.json tsconfig.json"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.22.0",
-    "@cloudflare/workers-types": "5.20260831.1",
-    "oxlint": "1.80.0",
-    "oxlint-tsgolint": "7.0.2001",
+    "@cloudflare/workers-types": "5.20261006.1",
+    "@types/node": "24.10.0",
+    "esbuild": "0.28.2",
     "prettier": "3.9.6",
-    "tsx": "4.23.13",
+    "tsx": "4.23.15",
     "typescript": "7.0.2",
-    "vitest": "4.1.11",
-    "wrangler": "4.127.1"
+    "wrangler": "4.150.0"
   }
 }

@@ -1,30 +1,90 @@
-import type { Env } from './types.js';
-import { CONFIG } from './config.js';
-import { runScheduled } from './scheduled.js';
-import { handleFetch } from './recovery.js';
-
+import type { Env } from "./configuration.ts";
+import { Engine } from "./engine.ts";
+const reply = (value: unknown, status = 200) =>
+  new Response(JSON.stringify(value), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+  });
+export class Guard {
+  private queue: Promise<unknown> = Promise.resolve();
+  private engine: Engine;
+  constructor(state: DurableObjectState, env: Env) {
+    this.engine = new Engine(state.storage, env);
+  }
+  fetch(request: Request): Promise<Response> {
+    // Serialize across awaited network I/O, including cutoff/rearm races.
+    const run = this.queue.then(async () => {
+      try {
+        const path = new URL(request.url).pathname;
+        if (path === "/tick") return reply(await this.engine.tick());
+        if (path === "/cutoff")
+          return reply(await this.engine.tick(Date.now(), true));
+        if (path === "/rearm")
+          return reply(
+            await this.engine.rearm(
+              request.headers.get("X-Confirm-Cutoff") ?? "",
+            ),
+          );
+        const s = await this.engine.state();
+        const stale =
+          !s.lastCheck || Date.now() - Date.parse(s.lastCheck) > 20 * 60000;
+        return reply(
+          { ...s, heartbeatStale: stale },
+          stale || s.errors.length || s.latched ? 503 : 200,
+        );
+      } catch {
+        return reply(
+          {
+            error:
+              "guard operation failed; inspect configuration, permissions and durable state",
+          },
+          503,
+        );
+      }
+    });
+    this.queue = run.catch(() => {});
+    return run;
+  }
+}
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    try {
-      return await handleFetch(request, env, CONFIG);
-    } catch (err) {
-      // Never surface a stack trace to the caller: /restore is reachable during
-      // a kill, so its error responses are the most exposed surface here.
-      console.error('fetch handler failed:', err);
-      return new Response(JSON.stringify({ error: 'Internal error' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    if (
+      !env.ADMIN_SECRET ||
+      request.headers.get("Authorization") !== `Bearer ${env.ADMIN_SECRET}`
+    )
+      return new Response("Not found", { status: 404 });
+    const path = new URL(request.url).pathname;
+    if (!(
+      (request.method === "GET" && path === "/status") ||
+      (request.method === "POST" && ["/cutoff", "/rearm"].includes(path))
+    ))
+      return new Response("Not found", { status: 404 });
+    return env.GUARD.get(env.GUARD.idFromName("ferrecar-v1")).fetch(request);
   },
-
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    // waitUntil swallows rejections, so without this an unexpected throw
-    // (a KV blip in readState, say) would lose the tick with nothing logged.
-    ctx.waitUntil(
-      runScheduled(env, CONFIG).catch((err: unknown) => {
-        console.error('scheduled tick failed:', err);
-      }),
-    );
+  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+    const result = await env.GUARD.get(
+      env.GUARD.idFromName("ferrecar-v1"),
+    ).fetch("https://guard.internal/tick");
+    const s = (await result.json()) as {
+      latched?: boolean;
+      warning?: boolean;
+      errors?: string[];
+      reason?: string;
+    };
+    if (!result.ok || s.latched || s.warning || s.errors?.length)
+      console.error(
+        JSON.stringify({
+          guard: "attention",
+          latched: s.latched,
+          warning: s.warning,
+          errors: s.errors,
+          reason: s.reason,
+        }),
+      );
+    if (!result.ok)
+      throw Error("guard execution failed; independent status check required");
   },
-};
+} satisfies ExportedHandler<Env>;
