@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { handleFetch } from '../src/recovery.js';
 import { readState, writeActive, writeKilled } from '../src/state.js';
-import type { AppConfig } from '../src/types.js';
+import type { AppConfig, Env } from '../src/types.js';
 import { CONFIG } from '../src/config.js';
 
 const cfg: AppConfig = { ...CONFIG, enableRecoveryWebhook: true };
@@ -14,6 +14,16 @@ function makeRequest(method: string, path: string, token?: string): Request {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return new Request(`http://worker${path}`, { method, headers });
+}
+
+// No RESTORE_RATE_LIMITER binding: exercises the in-memory fallback limiter.
+const envNoBinding = { ...env, RESTORE_RATE_LIMITER: undefined } as unknown as Env;
+
+function fromIp(ip: string, token: string): Request {
+  return new Request('http://worker/restore', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'CF-Connecting-IP': ip },
+  });
 }
 
 describe('handleFetch', () => {
@@ -65,98 +75,104 @@ describe('handleFetch', () => {
     expect(body.restored).toBe(true);
   });
 
-  it('returns 429 after 10 failed authentications', async () => {
-    // Reset the rolling window — prior tests in this file may have used some attempts.
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
-
+  it('returns 429 with Retry-After after 10 requests from one client (fallback limiter)', async () => {
+    const ip = '10.0.0.1';
     for (let i = 0; i < 10; i++) {
-      const r = await handleFetch(makeRequest('POST', '/restore', 'wrong-secret'), env, cfg);
+      const r = await handleFetch(fromIp(ip, 'wrong-secret'), envNoBinding, cfg);
       expect(r.status).toBe(403);
     }
-    const blocked = await handleFetch(makeRequest('POST', '/restore', 'wrong-secret'), env, cfg);
+    const blocked = await handleFetch(fromIp(ip, 'wrong-secret'), envNoBinding, cfg);
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get('Retry-After')).toBe('60');
 
-    // The window is on failures, so a correct secret is still throttled while
-    // it is open — the operator is not locked out beyond the 60s window.
-    const withSecret = await handleFetch(makeRequest('POST', '/restore', SECRET), env, cfg);
+    // Requests are counted before auth, so a correct secret is throttled too
+    // until the 60s window passes.
+    const withSecret = await handleFetch(fromIp(ip, SECRET), envNoBinding, cfg);
     expect(withSecret.status).toBe(429);
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
   });
 
-  /** The WAF rule exempts /restore so it stays reachable during a kill, and the
-   *  rate limiter used to write to KV on every request. Free-tier KV allows
-   *  1,000 writes/day — a metric this Worker monitors — so unauthenticated
-   *  traffic could trigger the very kill it is meant to guard against. */
-  it('does not write to KV for a successful restore', async () => {
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
-    const putSpy = vi.spyOn(env.KILL_SWITCH_STATE, 'put');
+  it('fallback limiter window expires after 60s', async () => {
+    vi.useFakeTimers();
     try {
-      const res = await handleFetch(makeRequest('POST', '/restore', SECRET), env, cfg);
-      expect(res.status).toBe(200);
-      const rateLimitWrites = putSpy.mock.calls.filter(([key]) =>
-        key.startsWith('restore-attempts'),
-      );
-      expect(rateLimitWrites).toHaveLength(0);
+      const ip = '10.0.0.2';
+      for (let i = 0; i < 10; i++) await handleFetch(fromIp(ip, 'wrong'), envNoBinding, cfg);
+      expect((await handleFetch(fromIp(ip, 'wrong'), envNoBinding, cfg)).status).toBe(429);
+      vi.advanceTimersByTime(60_001);
+      expect((await handleFetch(fromIp(ip, 'wrong'), envNoBinding, cfg)).status).toBe(403);
     } finally {
-      putSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 
-  it('does not write to KV for an unauthenticated request beyond the failure cap', async () => {
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
-    for (let i = 0; i < 10; i++) {
-      await handleFetch(makeRequest('POST', '/restore', 'nope'), env, cfg);
-    }
-
-    const putSpy = vi.spyOn(env.KILL_SWITCH_STATE, 'put');
+  it('fallback limiter logs the missing binding only once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      // Already at the cap: further requests are rejected by a read-only check,
-      // so an attacker cannot keep spending KV writes.
-      for (let i = 0; i < 5; i++) {
-        const res = await handleFetch(makeRequest('POST', '/restore', 'nope'), env, cfg);
-        expect(res.status).toBe(429);
+      await handleFetch(fromIp('10.0.0.3', 'wrong'), envNoBinding, cfg);
+      await handleFetch(fromIp('10.0.0.3', 'wrong'), envNoBinding, cfg);
+      const missing = warn.mock.calls.filter(([m]) => String(m).includes('RESTORE_RATE_LIMITER'));
+      expect(missing.length).toBeLessThanOrEqual(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('uses the rate limit binding when present and returns 429 when it denies', async () => {
+    const limit = vi.fn().mockResolvedValue({ success: false });
+    const envLimited = { ...env, RESTORE_RATE_LIMITER: { limit } } as unknown as Env;
+    const res = await handleFetch(fromIp('10.0.0.4', SECRET), envLimited, cfg);
+    expect(res.status).toBe(429);
+    expect(res.headers.get('Retry-After')).toBe('60');
+    expect(limit).toHaveBeenCalledWith({ key: '10.0.0.4' });
+  });
+
+  it('proceeds to auth when the binding allows the request', async () => {
+    const limit = vi.fn().mockResolvedValue({ success: true });
+    const envLimited = { ...env, RESTORE_RATE_LIMITER: { limit } } as unknown as Env;
+    expect((await handleFetch(fromIp('10.0.0.5', 'wrong'), envLimited, cfg)).status).toBe(403);
+    expect((await handleFetch(fromIp('10.0.0.5', SECRET), envLimited, cfg)).status).toBe(200);
+  });
+
+  /** The WAF rule exempts /restore so it stays reachable during a kill. Free-tier
+   *  KV allows 1,000 writes/day — a metric this Worker monitors — so rate limiting
+   *  must never touch KV, or unauthenticated traffic could trigger the kill. */
+  it('never writes to KV for rate limiting, with or without the binding', async () => {
+    const putSpy = vi.spyOn(env.KILL_SWITCH_STATE, 'put');
+    const limit = vi.fn().mockResolvedValue({ success: true });
+    const envLimited = { ...env, RESTORE_RATE_LIMITER: { limit } } as unknown as Env;
+    try {
+      for (let i = 0; i < 15; i++) {
+        await handleFetch(fromIp('10.0.0.6', 'nope'), envNoBinding, cfg);
+        await handleFetch(fromIp('10.0.0.7', 'nope'), envLimited, cfg);
       }
       expect(putSpy).not.toHaveBeenCalled();
+      const keys = await env.KILL_SWITCH_STATE.list({ prefix: 'restore-attempts' });
+      expect(keys.keys).toHaveLength(0);
     } finally {
       putSpy.mockRestore();
     }
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
   });
 
   it('returns 500 when RECOVERY_SECRET is not configured — "Bearer undefined" must not authenticate', async () => {
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
     const envNoSecret = { ...env, RECOVERY_SECRET: undefined as unknown as string };
     const res = await handleFetch(makeRequest('POST', '/restore', 'undefined'), envNoSecret, cfg);
     expect(res.status).toBe(500);
   });
 
   it('rejects requests where Authorization header has wrong length', async () => {
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
     const res = await handleFetch(makeRequest('POST', '/restore', SECRET + 'x'), env, cfg);
     expect(res.status).toBe(403);
   });
 
   it('rate-limits per client IP — one IP cannot lock out another', async () => {
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:1.2.3.4');
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:5.6.7.8');
-
-    const fromIp = (ip: string, token: string) =>
-      new Request('http://worker/restore', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'CF-Connecting-IP': ip },
-      });
-
     for (let i = 0; i < 10; i++) {
-      await handleFetch(fromIp('1.2.3.4', 'wrong'), env, cfg);
+      await handleFetch(fromIp('1.2.3.4', 'wrong'), envNoBinding, cfg);
     }
-    expect((await handleFetch(fromIp('1.2.3.4', 'wrong'), env, cfg)).status).toBe(429);
+    expect((await handleFetch(fromIp('1.2.3.4', 'wrong'), envNoBinding, cfg)).status).toBe(429);
     // The operator, on a different IP, can still recover during the attack.
-    expect((await handleFetch(fromIp('5.6.7.8', SECRET), env, cfg)).status).toBe(200);
+    expect((await handleFetch(fromIp('5.6.7.8', SECRET), envNoBinding, cfg)).status).toBe(200);
   });
 
   it('returns 502 and keeps a killed remnant when part of the restore fails', async () => {
-    await env.KILL_SWITCH_STATE.delete('restore-attempts:unknown');
     await writeKilled(env, {
       reason: 'test',
       wafRuleId: 'r-1',

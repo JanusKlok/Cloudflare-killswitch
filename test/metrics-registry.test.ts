@@ -1,6 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { env } from 'cloudflare:workers';
 import { MODULES } from '../src/metrics/index.js';
+import { build, collectUsage } from '../src/metrics/collect.js';
 import { evaluateSample } from '../src/metrics/evaluate.js';
+import { CONFIG } from '../src/config.js';
 import type { MetricSample } from '../src/types.js';
 
 describe('metrics registry', () => {
@@ -14,9 +17,10 @@ describe('metrics registry', () => {
     expect(names).toHaveLength(5);
   });
 
-  it('each module exports fetchUsage and evaluate functions', () => {
+  it('each module exports query, parse and evaluate functions', () => {
     for (const mod of MODULES) {
-      expect(typeof mod.fetchUsage).toBe('function');
+      expect(typeof mod.query).toBe('function');
+      expect(typeof mod.parse).toBe('function');
       expect(typeof mod.evaluate).toBe('function');
     }
   });
@@ -57,5 +61,33 @@ describe('evaluateSample', () => {
 
   it('returns empty when threshold is undefined', () => {
     expect(evaluateSample('w', daySample(999_999), undefined)).toHaveLength(0);
+  });
+});
+
+describe('merged query', () => {
+  const cfg = { ...CONFIG, billingCycleDay: 1 };
+
+  it('has no response key or variable claimed by two modules', () => {
+    // build() throws on a collision; this guards every future module.
+    expect(() =>
+      build(
+        env,
+        MODULES.map((mod) => ({ mod, query: mod.query(cfg) })),
+      ),
+    ).not.toThrow();
+  });
+
+  it('is a single request for all modules', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ data: { viewer: { accounts: [{}] } } }), { status: 200 }),
+        ),
+      ),
+    );
+    await collectUsage(env, cfg, MODULES);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 });

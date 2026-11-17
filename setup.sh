@@ -202,9 +202,10 @@ if [ "$BILLING_DAY" -gt 28 ]; then
 fi
 
 # ── Auto-reset ────────────────────────────────────────────────────────────────
-section "Billing-cycle auto-reset (optional)"
-printf "  Automatically lifts the block on the first check on or after day\n"
-printf "  %s of each month, once the quota that triggered it has reset.\n\n" "$BILLING_DAY"
+section "Auto-reset (optional)"
+printf "  Automatically lifts the block once the quota that triggered it has reset:\n"
+printf "  after 00:00 UTC for daily quotas, otherwise on or after day %s\n" "$BILLING_DAY"
+printf "  of each month. Never while something is still over a limit.\n\n"
 
 AUTO_RESET=true
 yn "Enable auto-reset?" Y || AUTO_RESET=false

@@ -27,8 +27,9 @@ export const CONFIG: AppConfig = {
   //   29-31 — falls back to the last day of shorter months (Feb 28/29)
   billingCycleDay: 1,
 
-  // Automatically restore on the first tick of each new billing period.
-  // Requires a valid billingCycleDay above.
+  // Automatically restore once the quota that caused the kill has reset and
+  // nothing is over a limit: after 00:00 UTC for a kill caused only by daily
+  // quotas, otherwise at the start of the next billing period (billingCycleDay).
   autoResetOnBillingCycle: true,
 
   // Expose POST /restore so you can re-arm without touching the dashboard.
@@ -45,11 +46,23 @@ export const CONFIG: AppConfig = {
       requests: { blockAt: 100_000 },
     },
 
+    combined: {
+      // Pages Functions requests count toward the same Workers Free quota of
+      // 100,000 requests / day, so workers.requests and pages.requests above
+      // can each stay under while their SUM exceeds it.  This limit is checked
+      // against workers + pages together; keep the two above as well.
+      requests: { blockAt: 100_000 },
+    },
+
     kv: {
       // Free tier: 100,000 reads / day
       reads: { blockAt: 100_000 },
       // Free tier: 1,000 writes / day
       writes: { blockAt: 1_000 },
+      // Free tier: 1,000 deletes / day
+      deletes: { blockAt: 1_000 },
+      // Free tier: 1,000 lists / day
+      lists: { blockAt: 1_000 },
       // Free tier: 1 GB storage (1,073,741,824 bytes)
       storageBytes: { blockAt: 1_073_741_824 },
     },
@@ -86,7 +99,7 @@ export const CONFIG: AppConfig = {
 
     // -----------------------------------------------------------------------
     // pages — Pages projects to block on kill.
-    // A temporary 503 Worker is deployed to each project.
+    // An empty deployment (404 everywhere, free) replaces the live one.
     // The original deployment is restored on recovery.
     //
     // 'all'    → auto-discover every Pages project on the account.

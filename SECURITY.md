@@ -28,8 +28,8 @@ In scope:
 
 - Bypassing the kill-switch logic (e.g. causing the worker to fail to block traffic when it should, or fail to restore when authorised)
 - Authentication weaknesses on `POST /restore`
-- Leaking secrets through logs, error messages, or email content
-- Injection vulnerabilities in API calls or the email subject/body
+- Leaking secrets through logs, error messages, or email or webhook content
+- Injection vulnerabilities in API calls or the email/webhook subject and body
 - Denial-of-service vectors that disable monitoring (e.g. crashing the cron tick)
 
 Out of scope:
@@ -51,9 +51,19 @@ For context — these are deliberate design choices the project already makes:
   provenance downgrades refused (`trust-policy=no-downgrade`)
 - GitHub Actions pinned to full commit SHAs, not mutable tags
 - Constant-time comparison on the recovery secret
-- Soft rate limit on `POST /restore` (10 **failed** authentications per minute
-  per client IP). Recorded only after a failed auth, so unauthenticated traffic
-  cannot spend the account's KV write quota — which is itself a monitored metric
+- Soft rate limit on `POST /restore` (10 requests per 60 seconds per client IP,
+  every request counted, checked before authentication), using the Workers Rate
+  Limiting binding `RESTORE_RATE_LIMITER`. Rate limiting never writes to KV, so
+  unauthenticated traffic cannot spend the account's KV write quota — which is
+  itself a monitored metric. Without the binding an in-memory per-isolate limiter
+  is used and `pnpm run validate` warns
+- Webhook alert URL (`ALERT_WEBHOOK_URL`) is kept as a secret, must be `https`,
+  is never followed through redirects, and never appears in error messages or
+  logs, since the URL itself is the credential
+- `blocking.workers` records each Worker's `workers.dev` / preview-URL state
+  before the kill and `blocking.r2` records each bucket's `r2.dev` state, and
+  restore re-enables only what was on, so a kill and restore cannot make a
+  private Worker or bucket public
 - The kill-switch worker excludes itself from `blocking.workers: 'all'` mode
 - WAF rule expression exempts `POST /restore` so the recovery path stays
   reachable, scoped to `RECOVERY_HOSTNAME` when set
@@ -63,19 +73,40 @@ For context — these are deliberate design choices the project already makes:
 These are documented rather than fixed, and are in scope for reports that
 demonstrate concrete impact:
 
-- The `/restore` rate limit is a soft cap. KV reads are eventually consistent
-  (~60 s), and an attacker rotating source IPs gets a fresh window per IP. The
-  32-byte `RECOVERY_SECRET` is the primary brute-force defense.
+- **A `/restore` racing a killed tick.** Killed ticks now write state when they
+  block something new. If one runs at the same moment as a successful
+  `POST /restore`, its write can land after the restore's and leave KV saying
+  "killed" while traffic flows; later ticks then treat the account as already
+  killed. The window is a few seconds; check the state after a manual restore
+  (see "Verifying it works") if you restore close to a 5-minute boundary.
+
+- The `/restore` rate limit is a soft cap. The binding's counts are per
+  Cloudflare location and eventually consistent, the in-memory fallback is per
+  isolate, and an attacker rotating source IPs gets a fresh window per IP. The
+  32-byte `RECOVERY_SECRET` is the primary brute-force defense. Cloudflare's docs
+  do not state whether the Rate Limiting binding is available on the Free plan.
+- A bucket whose `r2.dev` state could not be read is blocked but left off at
+  restore, to avoid making a private bucket public. It stays dark until the
+  operator re-enables it by hand (the alert says which).
+- `blocking.r2` turns off the `r2.dev` URL only. Buckets served through a connected
+  custom domain, and S3-API access with R2 API tokens, are not blocked.
+- While killed, a recorded Worker that is re-enabled by a redeploy (for example
+  `wrangler deploy` with `workers_dev = true`), or a recorded Pages project that
+  is redeployed, is not re-blocked. Workers, Pages projects and R2 buckets
+  created after the kill are blocked on the next tick.
 - `blocking.workers` disables the `workers.dev` subdomain only. A Worker served
   on a custom domain or route keeps serving unless a WAF rule covers its zone
   (`scope: 'zone'` / `'account'`).
 - A remnant that can never be restored (a deleted Pages project, say) is
   retried on every 5-minute tick, costing roughly 288 KV writes/day against the
-  free tier's 1,000. This cannot self-trigger a kill — the tick returns before
-  re-evaluating metrics — but it is deliberate: the alternative, capping the
+  free tier's 1,000. This cannot self-trigger a second kill — a killed tick never
+  starts a new one, whatever the usage reads — but it is deliberate: the alternative, capping the
   retries, permanently strands accounts that have `enableRecoveryWebhook: false`
   and so have no manual path back.
-- On the Workers Free plan an invocation is capped at 50 subrequests. A kill
-  with `workers: 'all'` and `pages: 'all'` on an account with many scripts and
-  projects can exhaust that budget mid-kill; the failures are logged and
-  reported in the alert email. Prefer explicit lists past roughly 30 combined.
+- On the Workers Free plan an invocation is capped at 50 subrequests. A quiet
+  tick costs 1 (a single GraphQL request); the first kill adds a GET and a
+  write per Worker, Pages project and R2 bucket, plus the WAF calls, and each
+  killed tick adds list calls for any blocking set to `'all'`. Past roughly 20
+  targets in total the budget can run out mid-kill; the failures are logged,
+  reported in the alert, and retried on later ticks. Prefer explicit lists past
+  that, or use a paid plan.

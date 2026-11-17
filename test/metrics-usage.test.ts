@@ -6,6 +6,7 @@ import { d1Module } from '../src/metrics/d1.js';
 import { workersModule } from '../src/metrics/workers.js';
 import { pagesModule } from '../src/metrics/pages.js';
 import { sumPerEntityMax } from '../src/metrics/storage.js';
+import { fetchModuleUsage } from '../src/metrics/collect.js';
 import { CONFIG } from '../src/config.js';
 import type { AppConfig, MetricSample } from '../src/types.js';
 
@@ -98,7 +99,7 @@ describe('workersModule.fetchUsage', () => {
         workersInvocationsAdaptive: [{ sum: { requests: 1_200 } }, { sum: { requests: 800 } }],
       }),
     );
-    const samples = await workersModule.fetchUsage(env, cfg);
+    const samples = await fetchModuleUsage(env, cfg, workersModule);
     expect(valueOf(samples, 'requests')).toBe(2_000);
     expect(samples[0]?.window).toBe('day');
   });
@@ -121,7 +122,7 @@ describe('pagesModule.fetchUsage', () => {
     vi.mocked(fetch).mockImplementation(
       gqlReply({ pagesFunctionsInvocationsAdaptiveGroups: [{ sum: { requests: 4_321 } }] }),
     );
-    const samples = await pagesModule.fetchUsage(env, cfg);
+    const samples = await fetchModuleUsage(env, cfg, pagesModule);
     expect(valueOf(samples, 'requests')).toBe(4_321);
   });
 });
@@ -137,7 +138,7 @@ describe('kvModule.fetchUsage', () => {
     { sum: { requests: 3 }, dimensions: { actionType: 'list' } },
   ];
 
-  it('splits reads from writes and sums storage per namespace', async () => {
+  it('counts reads, writes, deletes and lists separately and sums storage per namespace', async () => {
     vi.mocked(fetch).mockImplementation(
       gqlReply({
         kvOperationsAdaptiveGroups: ops,
@@ -149,11 +150,11 @@ describe('kvModule.fetchUsage', () => {
       }),
     );
 
-    const samples = await kvModule.fetchUsage(env, cfg);
+    const samples = await fetchModuleUsage(env, cfg, kvModule);
     expect(valueOf(samples, 'reads')).toBe(500);
-    // write + delete + list are metered separately by Cloudflare but share one
-    // counter here, so this documents the deliberate over-count.
-    expect(valueOf(samples, 'writes')).toBe(40);
+    expect(valueOf(samples, 'writes')).toBe(30);
+    expect(valueOf(samples, 'deletes')).toBe(7);
+    expect(valueOf(samples, 'lists')).toBe(3);
     expect(valueOf(samples, 'storageBytes')).toBe(6_500);
   });
 
@@ -161,7 +162,7 @@ describe('kvModule.fetchUsage', () => {
     vi.mocked(fetch).mockImplementation(
       gqlReply({ kvOperationsAdaptiveGroups: [], kvStorageAdaptiveGroups: [] }),
     );
-    const samples = await kvModule.fetchUsage(env, cfg);
+    const samples = await fetchModuleUsage(env, cfg, kvModule);
     expect(valueOf(samples, 'storageBytes')).toBe(0);
   });
 
@@ -169,13 +170,15 @@ describe('kvModule.fetchUsage', () => {
     vi.mocked(fetch).mockImplementation(
       gqlReply({ kvOperationsAdaptiveGroups: ops, kvStorageAdaptiveGroups: [] }),
     );
-    await expect(kvModule.fetchUsage(env, cfg)).rejects.toThrow(/rather than 0/);
+    await expect(fetchModuleUsage(env, cfg, kvModule)).rejects.toThrow(/rather than 0/);
   });
 
   it('maps every emitted metric name onto a configured limit', () => {
     const samples = [
       { metric: 'reads', value: Number.MAX_SAFE_INTEGER, window: 'day' as const },
       { metric: 'writes', value: Number.MAX_SAFE_INTEGER, window: 'day' as const },
+      { metric: 'deletes', value: Number.MAX_SAFE_INTEGER, window: 'day' as const },
+      { metric: 'lists', value: Number.MAX_SAFE_INTEGER, window: 'day' as const },
       { metric: 'storageBytes', value: Number.MAX_SAFE_INTEGER, window: 'cycle' as const },
     ];
     // A metric with no matching limits key would silently evaluate to nothing.
@@ -203,13 +206,13 @@ describe('r2Module.fetchUsage', () => {
       }),
     );
 
-    const samples = await r2Module.fetchUsage(env, cfg);
-    expect(valueOf(samples, 'classAOps')).toBe(15);
+    const samples = await fetchModuleUsage(env, cfg, r2Module);
+    expect(valueOf(samples, 'classAOps')).toBe(10); // DeleteObject is free
     expect(valueOf(samples, 'classBOps')).toBe(1_000);
     expect(valueOf(samples, 'storageBytes')).toBe(6_000);
   });
 
-  it('warns instead of silently dropping an unclassified operation', async () => {
+  it('warns and counts an unclassified operation as Class A', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.mocked(fetch).mockImplementation(
       gqlReply({
@@ -220,7 +223,7 @@ describe('r2Module.fetchUsage', () => {
       }),
     );
 
-    await r2Module.fetchUsage(env, cfg);
+    await fetchModuleUsage(env, cfg, r2Module);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('SomeFutureOperation'));
     warn.mockRestore();
   });
@@ -253,7 +256,7 @@ describe('d1Module.fetchUsage', () => {
       }),
     );
 
-    const samples = await d1Module.fetchUsage(env, cfg);
+    const samples = await fetchModuleUsage(env, cfg, d1Module);
     expect(valueOf(samples, 'rowReads')).toBe(1_500);
     expect(valueOf(samples, 'rowWrites')).toBe(15);
     expect(valueOf(samples, 'storageBytes')).toBe(1_000);
@@ -284,7 +287,7 @@ describe('storage query windows', () => {
     );
 
     // A cycle opening on the 1st would make a cycle-anchored window start then.
-    await kvModule.fetchUsage(env, { ...cfg, billingCycleDay: 1 });
+    await fetchModuleUsage(env, { ...cfg, billingCycleDay: 1 }, kvModule);
 
     const storageCall = vi
       .mocked(fetch)
@@ -292,13 +295,13 @@ describe('storage query windows', () => {
         ([, init]) =>
           JSON.parse((init as RequestInit).body as string) as {
             query: string;
-            variables: { start: string };
+            variables: { kvStorageStart: string };
           },
       )
       .find((b) => b.query.includes('kvStorageAdaptiveGroups'));
 
     expect(storageCall).toBeDefined();
-    const start = new Date(`${storageCall?.variables.start ?? ''}T00:00:00Z`);
+    const start = new Date(`${storageCall?.variables.kvStorageStart ?? ''}T00:00:00Z`);
     const ageDays = (Date.now() - start.getTime()) / 86_400_000;
     expect(ageDays).toBeLessThan(4);
   });

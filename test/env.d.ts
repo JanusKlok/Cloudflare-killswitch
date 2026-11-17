@@ -7,8 +7,10 @@ declare namespace Cloudflare {
     RECOVERY_SECRET: string;
     CLOUDFLARE_ACCOUNT_ID: string;
     CLOUDFLARE_ZONE_ID: string;
+    RESTORE_RATE_LIMITER?: RateLimit;
     SEND_EMAIL?: SendEmail;
     EMAIL_FROM?: string;
     EMAIL_TO?: string;
+    ALERT_WEBHOOK_URL?: string;
   }
 }

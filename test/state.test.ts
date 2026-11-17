@@ -107,6 +107,91 @@ describe('billingPeriodStart', () => {
   });
 });
 
+describe('writeKilled — retained fields', () => {
+  it('round-trips resetWindow, purgedServices (even empty) and pending lists', async () => {
+    await writeKilled(env, {
+      reason: 'x',
+      resetWindow: 'day',
+      purgedServices: [],
+      pendingWorkerBlocks: ['a'],
+      pendingPagesBlocks: ['p'],
+    });
+    const state = await readState(env);
+    expect(state.resetWindow).toBe('day');
+    expect(state.purgedServices).toEqual([]);
+    expect(state.pendingWorkerBlocks).toEqual(['a']);
+    expect(state.pendingPagesBlocks).toEqual(['p']);
+    await writeActive(env);
+  });
+
+  it('omits unset fields so a legacy state stays legacy-shaped', async () => {
+    await writeKilled(env, { reason: 'x', pendingWorkerBlocks: [] });
+    const state = await readState(env);
+    expect(state).not.toHaveProperty('resetWindow');
+    expect(state).not.toHaveProperty('purgedServices');
+    expect(state).not.toHaveProperty('pendingWorkerBlocks');
+    await writeActive(env);
+  });
+});
+
+describe('shouldAutoReset — day window', () => {
+  const cfg: AppConfig = { ...CONFIG, autoResetOnBillingCycle: true, billingCycleDay: 17 };
+  const killed = (iso: string, resetWindow?: 'day' | 'cycle'): KvState => ({
+    status: 'killed',
+    timestamp: iso,
+    killedAt: iso,
+    ...(resetWindow ? { resetWindow } : {}),
+  });
+
+  afterEach(() => vi.useRealTimers());
+
+  function at(iso: string) {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(iso));
+  }
+
+  it('is due once the kill predates 00:00 UTC today, and not before', () => {
+    const state = killed('2026-03-10T23:59:00Z', 'day');
+    at('2026-03-10T23:59:59Z');
+    expect(shouldAutoReset(state, cfg)).toBe(false);
+    at('2026-03-11T00:00:00Z');
+    expect(shouldAutoReset(state, cfg)).toBe(true);
+  });
+
+  it('is not due for a kill earlier the same UTC day', () => {
+    at('2026-03-10T20:00:00Z');
+    expect(shouldAutoReset(killed('2026-03-10T00:00:00Z', 'day'), cfg)).toBe(false);
+  });
+
+  it('leaves a cycle kill alone at midnight and resets it at the period start', () => {
+    const state = killed('2026-03-10T12:00:00Z', 'cycle');
+    at('2026-03-11T00:05:00Z');
+    expect(shouldAutoReset(state, cfg)).toBe(false);
+    at('2026-03-17T00:05:00Z');
+    expect(shouldAutoReset(state, cfg)).toBe(true);
+  });
+
+  it('treats a state without resetWindow (v2.0.0) as a cycle kill', () => {
+    const legacy = killed('2026-03-10T12:00:00Z');
+    at('2026-03-11T00:05:00Z');
+    expect(shouldAutoReset(legacy, cfg)).toBe(false);
+    at('2026-03-17T00:05:00Z');
+    expect(shouldAutoReset(legacy, cfg)).toBe(true);
+  });
+
+  it('stays gated by autoResetOnBillingCycle', () => {
+    at('2026-03-11T00:05:00Z');
+    const off = { ...cfg, autoResetOnBillingCycle: false };
+    expect(shouldAutoReset(killed('2026-03-10T12:00:00Z', 'day'), off)).toBe(false);
+  });
+
+  it('does not need a valid billingCycleDay', () => {
+    at('2026-03-11T00:05:00Z');
+    const bad = { ...cfg, billingCycleDay: 0 };
+    expect(shouldAutoReset(killed('2026-03-10T12:00:00Z', 'day'), bad)).toBe(true);
+  });
+});
+
 describe('shouldAutoReset', () => {
   const cfg = (over: Partial<AppConfig> = {}): AppConfig => ({
     ...CONFIG,

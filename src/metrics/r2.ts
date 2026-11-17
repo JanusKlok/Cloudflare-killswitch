@@ -1,132 +1,122 @@
-import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
-import { gql } from '../graphql/client.js';
+import type { AccountData, AppConfig, Breach, MetricSample, ServiceModule } from '../types.js';
 import { cycleStart, utcHoursAgo, utcNow } from '../graphql/queries.js';
 import { STORAGE_WINDOW_HOURS, sumPerEntityMax } from './storage.js';
 import { evaluateSample } from './evaluate.js';
 
 // R2 operation classification.
-// Class A: mutating operations that cost more per million.
-// Class B: read / metadata operations.
-// Source: https://developers.cloudflare.com/r2/pricing/
+// Source: https://developers.cloudflare.com/r2/pricing/ (verified 2026-11-17).
+// Class A: higher price per million, smaller free quota. This is NOT "mutating
+// operations": list operations are Class A and deletes are free.
+// Class B: reads and metadata lookups. Free: counted in neither class.
+// The analytics docs only say actionType is "the name of the operation", so
+// names that appear on the S3 compatibility page but not the pricing page
+// (aliases) are mapped to their pricing-page counterpart.
 const CLASS_A_OPS = new Set([
+  'ListBuckets',
+  'PutBucket',
+  'ListObjects',
   'PutObject',
   'CopyObject',
   'CompleteMultipartUpload',
   'CreateMultipartUpload',
+  'LifecycleStorageTierTransition',
+  'ListMultipartUploads',
   'UploadPart',
   'UploadPartCopy',
-  'DeleteObject',
-  'DeleteObjects',
-  'AbortMultipartUpload',
-  'CreateBucket',
-  'DeleteBucket',
+  'ListParts',
+  'PutBucketEncryption',
   'PutBucketCors',
-  'DeleteBucketCors',
   'PutBucketLifecycleConfiguration',
+  // Aliases (S3 API page names, absent from the pricing page).
+  'ListObjectsV2', // same operation family as ListObjects
+  'CreateBucket', // same as PutBucket
+  // Unconfirmed: not on the pricing page, so classed A conservatively.
+  'DeleteBucketCors',
   'DeleteBucketLifecycleConfiguration',
 ]);
 
 const CLASS_B_OPS = new Set([
-  'GetObject',
-  'HeadObject',
-  'ListObjects',
-  'ListObjectsV2',
   'HeadBucket',
-  'ListBuckets',
-  'ListMultipartUploads',
-  'ListParts',
-  'GetBucketCors',
+  'HeadObject',
+  'GetObject',
+  'UsageSummary',
+  'GetBucketEncryption',
   'GetBucketLocation',
+  'GetBucketCors',
   'GetBucketLifecycleConfiguration',
 ]);
 
-interface R2OpsData {
-  viewer: {
-    accounts: {
-      r2OperationsAdaptiveGroups: {
-        sum: { requests: number };
-        dimensions: { actionType: string };
-      }[];
-    }[];
-  };
-}
+const FREE_OPS = new Set([
+  'DeleteObject',
+  'DeleteBucket',
+  'AbortMultipartUpload',
+  'DeleteObjects', // alias: batch form of DeleteObject
+]);
 
-interface R2StorageData {
-  viewer: {
-    accounts: {
-      r2StorageAdaptiveGroups: {
-        max: { payloadSize: number };
-        dimensions: { bucketName: string };
-      }[];
-    }[];
-  };
+interface R2Account {
+  r2OperationsAdaptiveGroups?: {
+    sum: { requests: number };
+    dimensions: { actionType: string };
+  }[];
+  r2StorageAdaptiveGroups?: {
+    max: { payloadSize: number };
+    dimensions: { bucketName: string };
+  }[];
 }
 
 export const r2Module: ServiceModule = {
   name: 'r2',
 
-  async fetchUsage(env: Env, cfg: AppConfig): Promise<MetricSample[]> {
-    const [opsData, storageData] = await Promise.all([
-      gql<R2OpsData>(
-        env,
-        `query R2Ops($accountTag: String!, $start: String!, $end: String!) {
-          viewer {
-            accounts(filter: { accountTag: $accountTag }) {
-              r2OperationsAdaptiveGroups(
-                limit: 10000
-                filter: { datetime_geq: $start, datetime_leq: $end }
-              ) {
-                sum { requests }
-                dimensions { actionType }
-              }
-            }
-          }
-        }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: cycleStart(cfg), end: utcNow() },
-      ),
-      gql<R2StorageData>(
-        env,
-        `query R2Storage($accountTag: String!, $start: String!, $end: String!) {
-          viewer {
-            accounts(filter: { accountTag: $accountTag }) {
-              r2StorageAdaptiveGroups(
-                limit: 10000
-                filter: { datetime_geq: $start, datetime_leq: $end }
-              ) {
-                max { payloadSize }
-                dimensions { bucketName }
-              }
-            }
-          }
-        }`,
-        {
-          accountTag: env.CLOUDFLARE_ACCOUNT_ID,
-          start: utcHoursAgo(STORAGE_WINDOW_HOURS),
-          end: utcNow(),
-        },
-      ),
-    ]);
+  query(cfg: AppConfig) {
+    return {
+      keys: ['r2OperationsAdaptiveGroups', 'r2StorageAdaptiveGroups'],
+      selection: `r2OperationsAdaptiveGroups(
+        limit: 10000
+        filter: { datetime_geq: $r2OpsStart, datetime_leq: $r2OpsEnd }
+      ) {
+        sum { requests }
+        dimensions { actionType }
+      }
+      r2StorageAdaptiveGroups(
+        limit: 10000
+        filter: { datetime_geq: $r2StorageStart, datetime_leq: $r2StorageEnd }
+      ) {
+        max { payloadSize }
+        dimensions { bucketName }
+      }`,
+      variables: {
+        r2OpsStart: { type: 'String!', value: cycleStart(cfg) },
+        r2OpsEnd: { type: 'String!', value: utcNow() },
+        r2StorageStart: { type: 'String!', value: utcHoursAgo(STORAGE_WINDOW_HOURS) },
+        r2StorageEnd: { type: 'String!', value: utcNow() },
+      },
+    };
+  },
 
-    const opsRows = opsData.viewer.accounts[0]?.r2OperationsAdaptiveGroups ?? [];
+  parse(account: AccountData): MetricSample[] {
+    const { r2OperationsAdaptiveGroups, r2StorageAdaptiveGroups } = account as R2Account;
+    const opsRows = r2OperationsAdaptiveGroups ?? [];
     let classAOps = 0;
     let classBOps = 0;
     for (const row of opsRows) {
       const t = row.dimensions.actionType;
       if (CLASS_A_OPS.has(t)) classAOps += row.sum.requests;
       else if (CLASS_B_OPS.has(t)) classBOps += row.sum.requests;
-      // Cloudflare adds operations over time. Without this an unrecognised
-      // name would be dropped from the billable total with no trace.
-      else
+      else if (FREE_OPS.has(t)) continue;
+      else {
+        // Fail safe: an unrecognised operation is billed as the more expensive,
+        // smaller-quota class so a new name can only over-count, never hide spend.
+        classAOps += row.sum.requests;
         console.warn(
-          `r2: unclassified actionType "${t}" (${row.sum.requests} requests) counted in neither class`,
+          `r2: unclassified actionType "${t}" (${row.sum.requests} requests) counted as Class A`,
         );
+      }
     }
 
-    const storageRows = storageData.viewer.accounts[0]?.r2StorageAdaptiveGroups ?? [];
     const storageBytes = sumPerEntityMax(
       'r2',
       'r2StorageAdaptiveGroups.max.payloadSize',
-      storageRows,
+      r2StorageAdaptiveGroups ?? [],
       (r) => r.dimensions.bucketName,
       (r) => r.max.payloadSize,
       opsRows.length > 0,

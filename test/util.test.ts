@@ -48,6 +48,60 @@ describe('fetchRetry', () => {
     await expect(fetchRetry('https://example.com')).rejects.toThrow('connection reset');
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
   });
+
+  it('retries a 429 and succeeds on the second attempt', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('slow down', { status: 429 }))
+      .mockResolvedValueOnce(ok({ ok: true }));
+    const res = await fetchRetry('https://example.com');
+    expect(res.status).toBe(200);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it('honours a short Retry-After on a 429', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '1' } }))
+      .mockResolvedValueOnce(ok({ ok: true }));
+    const start = Date.now();
+    const res = await fetchRetry('https://example.com');
+    expect(res.status).toBe(200);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(900);
+  });
+
+  it('returns a 429 immediately when Retry-After exceeds the cap', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response('', { status: 429, headers: { 'Retry-After': '120' } }),
+    );
+    const start = Date.now();
+    const res = await fetchRetry('https://example.com');
+    expect(res.status).toBe(429);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  it('aborts a hung attempt on timeout and retries', async () => {
+    vi.mocked(fetch)
+      .mockImplementationOnce(
+        (_input, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+          }),
+      )
+      .mockResolvedValueOnce(ok({ ok: true }));
+    const res = await fetchRetry('https://example.com', undefined, 2, 20);
+    expect(res.status).toBe(200);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry when the caller aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.mocked(fetch).mockRejectedValue(new DOMException('aborted', 'AbortError'));
+    await expect(fetchRetry('https://example.com', { signal: controller.signal })).rejects.toThrow(
+      'aborted',
+    );
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('cfFetch', () => {

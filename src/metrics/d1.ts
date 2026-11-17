@@ -1,81 +1,54 @@
-import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
-import { gql } from '../graphql/client.js';
+import type { AccountData, AppConfig, Breach, MetricSample, ServiceModule } from '../types.js';
 import { utcDaysAgo, utcToday } from '../graphql/queries.js';
 import { STORAGE_WINDOW_DAYS, sumPerEntityMax } from './storage.js';
 import { evaluateSample } from './evaluate.js';
 
-interface D1OpsData {
-  viewer: {
-    accounts: {
-      d1AnalyticsAdaptiveGroups: { sum: { rowsRead: number; rowsWritten: number } }[];
-    }[];
-  };
-}
-
-interface D1StorageData {
-  viewer: {
-    accounts: {
-      d1StorageAdaptiveGroups: {
-        max: { databaseSizeBytes: number };
-        dimensions: { databaseId: string };
-      }[];
-    }[];
-  };
+interface D1Account {
+  d1AnalyticsAdaptiveGroups?: { sum: { rowsRead: number; rowsWritten: number } }[];
+  d1StorageAdaptiveGroups?: {
+    max: { databaseSizeBytes: number };
+    dimensions: { databaseId: string };
+  }[];
 }
 
 export const d1Module: ServiceModule = {
   name: 'd1',
 
-  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
-    const [opsData, storageData] = await Promise.all([
-      gql<D1OpsData>(
-        env,
-        `query D1Ops($accountTag: String!, $start: String!, $end: String!) {
-          viewer {
-            accounts(filter: { accountTag: $accountTag }) {
-              d1AnalyticsAdaptiveGroups(
-                limit: 10000
-                filter: { date_geq: $start, date_leq: $end }
-              ) {
-                sum { rowsRead rowsWritten }
-              }
-            }
-          }
-        }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcToday(), end: utcToday() },
-      ),
-      gql<D1StorageData>(
-        env,
-        `query D1Storage($accountTag: String!, $start: String!, $end: String!) {
-          viewer {
-            accounts(filter: { accountTag: $accountTag }) {
-              d1StorageAdaptiveGroups(
-                limit: 10000
-                filter: { date_geq: $start, date_leq: $end }
-              ) {
-                max { databaseSizeBytes }
-                dimensions { databaseId }
-              }
-            }
-          }
-        }`,
-        {
-          accountTag: env.CLOUDFLARE_ACCOUNT_ID,
-          start: utcDaysAgo(STORAGE_WINDOW_DAYS),
-          end: utcToday(),
-        },
-      ),
-    ]);
+  query() {
+    return {
+      keys: ['d1AnalyticsAdaptiveGroups', 'd1StorageAdaptiveGroups'],
+      selection: `d1AnalyticsAdaptiveGroups(
+        limit: 10000
+        filter: { date_geq: $d1OpsStart, date_leq: $d1OpsEnd }
+      ) {
+        sum { rowsRead rowsWritten }
+      }
+      d1StorageAdaptiveGroups(
+        limit: 10000
+        filter: { date_geq: $d1StorageStart, date_leq: $d1StorageEnd }
+      ) {
+        max { databaseSizeBytes }
+        dimensions { databaseId }
+      }`,
+      variables: {
+        d1OpsStart: { type: 'String!', value: utcToday() },
+        d1OpsEnd: { type: 'String!', value: utcToday() },
+        d1StorageStart: { type: 'String!', value: utcDaysAgo(STORAGE_WINDOW_DAYS) },
+        d1StorageEnd: { type: 'String!', value: utcToday() },
+      },
+    };
+  },
 
-    const opsRows = opsData.viewer.accounts[0]?.d1AnalyticsAdaptiveGroups ?? [];
+  parse(account: AccountData): MetricSample[] {
+    const { d1AnalyticsAdaptiveGroups, d1StorageAdaptiveGroups } = account as D1Account;
+    const opsRows = d1AnalyticsAdaptiveGroups ?? [];
     const rowReads = opsRows.reduce((sum, r) => sum + r.sum.rowsRead, 0);
     const rowWrites = opsRows.reduce((sum, r) => sum + r.sum.rowsWritten, 0);
 
-    const storageRows = storageData.viewer.accounts[0]?.d1StorageAdaptiveGroups ?? [];
     const storageBytes = sumPerEntityMax(
       'd1',
       'd1StorageAdaptiveGroups.max.databaseSizeBytes',
-      storageRows,
+      d1StorageAdaptiveGroups ?? [],
       (r) => r.dimensions.databaseId,
       (r) => r.max.databaseSizeBytes,
       opsRows.length > 0,

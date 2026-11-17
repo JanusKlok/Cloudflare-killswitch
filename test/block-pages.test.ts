@@ -7,10 +7,10 @@ import type { AppConfig } from '../src/types.js';
 const BASE_CFG: AppConfig = { ...CONFIG };
 
 /** Discovery + mutation, the pair runScheduled runs. They are separate exports
- *  so the kill can record each project's pre-kill deployment id before the 503
- *  bundle makes it unrecoverable. */
+ *  so the kill can record each project's pre-kill deployment id before the empty
+ *  kill deployment makes it unrecoverable. */
 async function blockFromConfig(cfg: AppConfig) {
-  return blockPages(env, cfg, await resolvePageTargets(env, cfg));
+  return blockPages(env, await resolvePageTargets(env, cfg));
 }
 
 function makeProjectListResponse(...names: string[]) {
@@ -54,7 +54,7 @@ describe('blockPages — with projects', () => {
   beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
   afterEach(() => vi.unstubAllGlobals());
 
-  it('saves the current deployment ID and deploys a kill bundle', async () => {
+  it('saves the current deployment ID and deploys the empty kill deployment', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(
         new Response(JSON.stringify(makeProjectResponse('prev-deploy-id')), { status: 200 }),
@@ -69,7 +69,7 @@ describe('blockPages — with projects', () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
   });
 
-  it('uses POST to the deployments endpoint with _worker.bundle', async () => {
+  it('POSTs an empty deployment with no Worker (static 404s are free; a Worker would be metered)', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(
         new Response(JSON.stringify(makeProjectResponse('d-1')), { status: 200 }),
@@ -84,6 +84,10 @@ describe('blockPages — with projects', () => {
     expect(deployInit.method).toBe('POST');
     // Body is FormData (not JSON), so Content-Type is NOT manually set to application/json.
     expect(deployInit.headers).not.toHaveProperty('Content-Type', 'application/json');
+    const form = deployInit.body as FormData;
+    expect(form.get('manifest')).toBe('{}');
+    expect(form.has('_worker.bundle')).toBe(false);
+    expect(form.has('_worker.js')).toBe(false);
   });
 
   it("deploys to the project's production branch (a preview branch would not block the live site)", async () => {

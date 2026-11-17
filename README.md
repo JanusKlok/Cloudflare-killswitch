@@ -4,17 +4,18 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node.js 22+](https://img.shields.io/badge/node-22%2B-brightgreen.svg)](./package.json)
 
-A Cloudflare Worker that monitors your usage on a configurable schedule and automatically blocks all traffic — with optional data purge and email alerts — the moment any configured limit is crossed.
+A Cloudflare Worker that monitors your usage on a configurable schedule and automatically blocks all traffic — with optional data purge and email or webhook alerts — the moment any configured limit is crossed.
 
 When a limit is hit, the worker:
 
 1. Deploys a WAF Custom Rule that blocks every incoming request
-2. Disables the `workers.dev` subdomain for configured Workers scripts (optional)
-3. Deploys a 503 maintenance Worker to configured Pages projects (optional)
-4. Sends an email alert with a full breach report (optional)
-5. Optionally purges R2 objects or D1 table data if storage crosses a higher, opt-in threshold
-6. Writes state to KV so subsequent cron ticks are instant no-ops
-7. Automatically re-arms itself when your next Cloudflare billing period opens
+2. Disables the `workers.dev` subdomain and preview URLs for configured Workers scripts that expose them (optional)
+3. Replaces the production deployment of configured Pages projects with an empty one, so they serve 404 (optional)
+4. Turns off the public `r2.dev` URL of configured R2 buckets (optional)
+5. Sends an alert with a full breach report, by email and/or webhook (optional)
+6. Optionally purges R2 objects or D1 table data if storage crosses a higher, opt-in threshold
+7. Writes state to KV, so later cron ticks only have to keep the block in place
+8. Automatically re-arms itself once the quota that caused the kill has reset — at 00:00 UTC for daily quotas, or when your billing period opens for per-cycle limits
 
 A recovery endpoint (`POST /restore`) lets you lift the block immediately without touching the Cloudflare dashboard.
 
@@ -29,9 +30,10 @@ No external services, no runtime dependencies. Runs entirely on Cloudflare infra
 - [Automated setup](#automated-setup-recommended)
 - [Manual setup](#manual-setup)
 - [Configuration reference](#configuration-reference)
+- [How this compares with Cloudflare Spend Management](#how-this-compares-with-cloudflare-spend-management)
 - [Metrics and default limits](#metrics-and-default-limits)
-- [Optional: email alerts](#optional-email-alerts)
-- [Optional: Workers and Pages blocking](#optional-workers-and-pages-blocking)
+- [Optional: alerts (email and webhook)](#optional-alerts-email-and-webhook)
+- [Optional: Workers, Pages and R2 blocking](#optional-workers-pages-and-r2-blocking)
 - [Optional: destructive purge](#optional-destructive-purge)
 - [Recovery](#recovery)
 - [Verifying it works](#verifying-it-works)
@@ -48,37 +50,49 @@ No external services, no runtime dependencies. Runs entirely on Cloudflare infra
 On each cron tick (default: every 5 minutes, configurable in wrangler.toml):
 
   1. Read KV state
-       → status is 'killed', still inside the same billing period → exit
-         immediately
-       → status is 'killed' and a new billing period has opened (see
-         billingCycleDay) → remove WAF rule, re-enable Workers and Pages,
-         reset to 'active', continue monitoring
 
   2. Query Cloudflare GraphQL Analytics API for current usage across
-     Workers, Pages, KV, R2, and D1
+     Workers, Pages, KV, R2, and D1 — one request for all of them, and on
+     every tick, including while killed
 
   3. Compare every metric against its configured blockAt threshold
 
-  4. If any threshold is breached:
+  4. State is 'active' and a threshold is breached:
        a. Deploy a WAF Custom Rule blocking all requests
           (POST /restore is exempted so you can still recover)
-       b. Disable the workers.dev subdomain for configured Workers scripts
-       c. Deploy a 503 Worker to configured Pages projects (saves current deployment ID)
+       b. Look up which configured Workers scripts, Pages projects and R2
+          buckets are exposed, and record them in KV BEFORE touching them
+       c. Turn off workers.dev + preview URLs for the exposed Workers scripts,
+          deploy an empty site to the Pages projects, turn off the r2.dev URL
+          of the public R2 buckets
        d. If an R2 metric exceeds purgeAt: run the configured R2 purge actions;
           if a D1 metric exceeds purgeAt: run the configured D1 purge actions
           (destructive — opt-in only; other services never trigger purges)
-       e. Send email alert with breach details and all blocking results
-       f. Write 'killed' state to KV including WAF rule ID, disabled Workers,
-          and blocked Pages deployment IDs
+       e. Send an alert (email and/or webhook) with breach details and all
+          blocking results
+       f. Write 'killed' state to KV (WAF rule ID, the pre-kill state of each
+          Worker and R2 bucket, blocked Pages deployment IDs)
+
+  5. State is 'killed':
+       a. Auto-reset due (see autoResetOnBillingCycle) and nothing over a
+          limit → undo everything recorded, set 'active', resume monitoring
+          (due but still over a limit → stay killed)
+       b. Otherwise keep the block in place: block Workers, Pages projects and
+          R2 buckets created since the kill, retry blocks that failed, retry a
+          WAF rule that never deployed, and run a purge — at most once per
+          service — if purgeAt is reached after the kill. KV is written only
+          when something changed; an alert is sent only when something new
+          happened
 
 POST /restore:
   1. Verify Authorization: Bearer <RECOVERY_SECRET>
   2. Roll back Pages projects to their pre-kill production deployments
-  3. Re-enable the workers.dev subdomain for each disabled Workers script
-  4. Delete the WAF rule via the Cloudflare API
-  5. Write 'active' state to KV (on partial failure the state stays
+  3. Write back each Worker's recorded workers.dev / preview-URL values
+  4. Turn the r2.dev URL back on for buckets that were public before the kill
+  5. Delete the WAF rule via the Cloudflare API
+  6. Write 'active' state to KV (on partial failure the state stays
      'killed' with only the failed items, so a retry picks them up)
-  6. Return { restored: true, previousReason: "..." }
+  7. Return { restored: true, previousReason: "..." }
 ```
 
 State is a small JSON object in KV:
@@ -87,17 +101,29 @@ State is a small JSON object in KV:
 {
   "status": "killed",
   "timestamp": "2026-05-08T14:32:00.000Z",
+  "killedAt": "2026-05-08T14:32:00.000Z",
   "reason": "2 block breach(es)",
+  "resetWindow": "day",
+  "purgedServices": [],
   "wafRuleId": "abc123",
   "wafRulesetId": "def456",
-  "disabledWorkerScripts": ["my-app-worker"],
+  "disabledWorkerScripts": [
+    { "script": "my-app-worker", "enabled": true, "previewsEnabled": false }
+  ],
   "blockedPagesProjects": [
-    { "project": "my-site", "previousDeploymentId": "deploy-abc123" }
-  ]
+    { "project": "my-site", "previousDeploymentId": "deploy-abc123", "productionBranch": "main" }
+  ],
+  "blockedR2Buckets": [{ "bucket": "my-public-assets" }]
 }
 ```
 
-All IDs are stored so `POST /restore` can undo each action precisely — no manual dashboard work needed.
+All IDs are stored so `POST /restore` can undo each action precisely — no manual dashboard work needed. Besides the fields above:
+
+- `resetWindow` — `"day"` or `"cycle"`: which quota has to roll over before auto-reset is due (see [`autoResetOnBillingCycle`](#autoresetonbillingcycle)). Absent in states written by v2.0.0, which reset per billing cycle.
+- `purgedServices` — services whose purge already ran during this kill, so it never runs twice. Absent in v2.0.0 states, which never purge on a later tick.
+- `pendingWorkerBlocks`, `pendingPagesBlocks`, `pendingR2Blocks` — recorded targets whose block call has not succeeded yet; retried on every tick.
+- `blockedPagesProjects[].productionBranch` — the branch a retried kill deployment is pushed to.
+- `blockedR2Buckets` — buckets whose `r2.dev` URL was on (with `jurisdiction` for non-default ones, and `priorStateUnknown` when the state could not be read).
 
 ---
 
@@ -149,8 +175,8 @@ If you prefer full control over each step, or want to understand exactly what th
 |------|-----------|
 | KV namespace + wrangler.toml placeholders | Yes |
 | `CLOUDFLARE_API_TOKEN` secret | Yes |
-| `RECOVERY_SECRET` secret | Only if keeping `enableRecoveryWebhook: true` (the default) |
-| Email setup | No — silently skipped if not configured |
+| `RECOVERY_SECRET` secret | Only if you set `enableRecoveryWebhook: true` (default `false`) |
+| Email or webhook alerts | No — silently skipped if not configured |
 | R2 / D1 bindings | No — only needed if you opt into destructive purge |
 
 ### 1. Get the code
@@ -223,7 +249,7 @@ pnpm exec wrangler secret put CLOUDFLARE_API_TOKEN
 
 Paste your Cloudflare API token when prompted. See [API token permissions](#api-token-permissions) for what scopes it needs. Create one at `dash.cloudflare.com/profile/api-tokens`.
 
-**Optional — only needed if you keep `enableRecoveryWebhook: true` in config.ts (the default):**
+**Optional — only needed if you set `enableRecoveryWebhook: true` in config.ts (it defaults to `false`):**
 
 ```
 pnpm exec wrangler secret put RECOVERY_SECRET
@@ -239,7 +265,7 @@ openssl rand -hex 32
 [System.Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 ```
 
-Store it in a password manager. If you don't want the recovery webhook at all, set `enableRecoveryWebhook: false` in `config.ts` and skip this secret entirely.
+Store it in a password manager. If you leave `enableRecoveryWebhook` at its default of `false`, skip this secret entirely.
 
 ### 6. Review src/config.ts
 
@@ -259,14 +285,15 @@ Only edit this file if you want to:
 - Enable automatic data purge — add `purgeAt` to a storage metric (see [Optional: destructive purge](#optional-destructive-purge))
 - Protect all zones instead of one — change `scope` to `'account'` (requires an Enterprise plan)
 - No domain on the account at all — change `scope` to `'none'` and rely on `blocking.workers` / `blocking.pages`
+- Also turn off public `r2.dev` bucket URLs on a kill — set `blocking.r2` to `'all'` or a list of bucket names
 - Keep the block in place until you manually restore — set `autoResetOnBillingCycle: false`
-- Disable the recovery webhook entirely — set `enableRecoveryWebhook: false` (and skip `RECOVERY_SECRET` in step 5)
+- Enable the recovery webhook — set `enableRecoveryWebhook: true` (and set `RECOVERY_SECRET` in step 5)
 
 See the [Configuration reference](#configuration-reference) for full details on every option.
 
 ### 7. Deploy
 
-At this point the worker is fully functional. Email alerts and data purge can be added later without redeploying from scratch — they are configured and enabled independently.
+At this point the worker is fully functional. Alerts (email or webhook) and data purge can be added later without redeploying from scratch — they are configured and enabled independently.
 
 ```
 pnpm typecheck   # optional — catches type errors before deploy
@@ -308,9 +335,9 @@ export const CONFIG: AppConfig = {
   billingCycleDay: 1,
   autoResetOnBillingCycle: true,
   enableRecoveryWebhook: true,
-  limits: { workers, pages, kv, r2, d1 },
+  limits: { workers, pages, combined, kv, r2, d1 },
   purgeConfig: { r2: [], d1: [] },
-  blocking: { workers: [], pages: [] },
+  blocking: { workers: [], pages: [], r2: [] },
 };
 ```
 
@@ -342,9 +369,8 @@ under **Manage Account → Billing** in the dashboard.
 
 This anchors two things, so it matters even with auto-reset switched off:
 
-- **Auto-reset timing** — when `autoResetOnBillingCycle` is on
-- **Per-cycle metric windows** — R2 Class A/B operations, and the KV / R2 / D1
-  storage ceilings
+- **Auto-reset timing** — when `autoResetOnBillingCycle` is on, for kills caused by a per-cycle limit
+- **Per-cycle metric windows** — R2 Class A/B operations, and the KV, R2 and D1 storage ceilings
 
 Getting it wrong mis-measures usage in both directions. With a cycle starting on
 the 17th and a naive calendar-month window, a check on 5 February would count
@@ -372,13 +398,26 @@ cause auto-reset to be skipped at runtime rather than guessed at.
 autoResetOnBillingCycle: boolean  // default: true
 ```
 
-When `true`, the worker automatically removes the WAF block and resets to
-`active` once the kill event falls in a **previous billing period** — that is, on
-the first cron tick on or after day `billingCycleDay` of the month.
+When `true`, the kill switch restores itself once the quota that caused the kill
+has reset, provided nothing is still over a limit:
 
-It is deliberately not gated on the anniversary day itself: if the Worker is down
-for the whole of that day, it still recovers on the next tick rather than waiting
-another full cycle.
+- If every breach was a **daily** quota (Workers/Pages requests, KV reads/writes/
+  deletes/lists, D1 rows), the kill ends on the first tick after 00:00 UTC.
+- If any breach was **per-cycle** (R2 operations, or a KV/R2/D1 storage ceiling),
+  it ends on the first tick after your billing period starts (`billingCycleDay`).
+- A daily kill is upgraded to a cycle kill if a per-cycle limit is also breached
+  later.
+
+On the Free plan, exceeding a daily quota just makes requests fail (no charge),
+so the daily reset mirrors Cloudflare's own behaviour.
+
+Usage is checked on every tick, even while killed. If a limit is still exceeded
+when a reset is due, the kill switch stays killed instead of restoring and
+re-killing. States written by v2.0.0 reset per billing cycle, as before.
+
+Neither reset is gated on the boundary day itself: if the Worker is down across
+the boundary, it still recovers on the next tick rather than waiting another
+full period.
 
 Set to `false` if you want the block to remain indefinitely until you call
 `POST /restore` manually. Useful if you want to investigate a breach before
@@ -387,7 +426,7 @@ re-enabling traffic.
 ### enableRecoveryWebhook
 
 ```ts
-enableRecoveryWebhook: boolean  // default: true
+enableRecoveryWebhook: boolean  // default: false
 ```
 
 When `true`:
@@ -433,6 +472,20 @@ pages: {
 }
 ```
 
+**Combined (Workers + Pages Functions)**
+
+```ts
+combined: {
+  requests: { blockAt: 100_000 }
+  //   Pages Functions requests count toward the Workers Free quota of 100,000 per day
+  //   (https://developers.cloudflare.com/pages/functions/pricing/), so this checks
+  //   workers.requests + pages.requests together
+  //   window: UTC calendar day
+}
+```
+
+`limits.combined` is optional — leave it out and the two services are only checked separately, so 60,000 + 60,000 trips neither limit yet exceeds the shared quota (`pnpm run validate` notes when it is missing). Keep the per-service limits as well. If the Workers analytics already include Pages Functions invocations, the sum double counts: the switch may then fire early, but never late. The check is skipped, with a reported error, when either side's usage could not be read, rather than comparing a partial sum.
+
 **KV**
 
 ```ts
@@ -441,7 +494,7 @@ kv: {
   writes:       { blockAt: 1_000 },         // write ops / day  (free tier: 1,000)
   storageBytes: { blockAt: 1_073_741_824 }, // storage in bytes (free tier: 1 GB)
   //   reads and writes: window = UTC calendar day
-  //   storageBytes:     window = current billing cycle (see billingCycleDay)
+  //   storageBytes:     current size (latest gauge in the last 48 hours), not a counter
 }
 ```
 
@@ -449,14 +502,15 @@ kv: {
 
 ```ts
 r2: {
-  storageBytes: { blockAt: 10_737_418_240 }, // storage in bytes  (free tier: 10 GB / month)
+  storageBytes: { blockAt: 10_737_418_240 }, // storage in bytes  (free tier: 10 GB)
   classAOps:    { blockAt: 1_000_000 },      // Class A ops / month (free tier: 1M)
   classBOps:    { blockAt: 10_000_000 },     // Class B ops / month (free tier: 10M)
-  //   All R2 metrics: window = current billing cycle (see billingCycleDay)
+  //   classAOps / classBOps: window = current billing cycle (see billingCycleDay)
+  //   storageBytes:          current size (latest gauge in the last 48 hours), not a counter
 }
 ```
 
-Class A operations are mutating: `PUT`, `DELETE`, `LIST`. Class B are read operations: `GET`, `HEAD`.
+R2 Class A operations are the higher-priced, smaller-quota class (writes, copies, multipart steps and list operations such as `ListObjects` and `ListBuckets`). Class B covers reads and metadata lookups like `GetObject` and `HeadObject`. Deletes and `AbortMultipartUpload` are free and counted in neither class. Any operation the tool does not recognise is counted as Class A, with a warning.
 
 **D1**
 
@@ -464,9 +518,9 @@ Class A operations are mutating: `PUT`, `DELETE`, `LIST`. Class B are read opera
 d1: {
   rowReads:     { blockAt: 5_000_000 },      // row reads / day   (free tier: 5M)
   rowWrites:    { blockAt: 100_000 },        // row writes / day  (free tier: 100,000)
-  storageBytes: { blockAt: 5_368_709_120 },  // storage in bytes  (free tier: 5 GB / month)
+  storageBytes: { blockAt: 5_368_709_120 },  // storage in bytes  (free tier: 5 GB)
   //   rowReads and rowWrites: window = UTC calendar day
-  //   storageBytes:           window = current billing cycle (see billingCycleDay)
+  //   storageBytes:           current size (latest gauge in the last 48 hours), not a counter
 }
 ```
 
@@ -487,18 +541,21 @@ Both arrays are **empty by default**. Purge is completely opt-in and only runs w
 blocking: {
   workers: 'all' | string[],  // default: []
   pages:   'all' | string[],  // default: []
+  r2?:     'all' | string[],  // default: [] (absent = R2 is not touched)
 }
 ```
 
-Controls which additional resources are blocked when the kill switch fires. Both are **empty by default** — the WAF rule handles traffic on your custom domain and no additional action is taken on `workers.dev` or `pages.dev` subdomains unless you configure them here.
+Controls which additional resources are blocked when the kill switch fires. All are **empty by default** — the WAF rule handles traffic on your custom domain and no additional action is taken on `workers.dev` or `pages.dev` subdomains, or on `r2.dev` URLs, unless you configure them here.
 
 **`blocking.workers`**
 
 | Value | Effect |
 |-------|--------|
 | `[]` (default) | Workers scripts are left untouched |
-| `'all'` | Every deployed Workers script **except the kill-switch itself** has its `workers.dev` subdomain disabled |
-| `['script-a', 'script-b']` | Only the named scripts have their `workers.dev` subdomain disabled |
+| `'all'` | Every deployed Workers script **except the kill-switch itself** has its `workers.dev` subdomain and preview URLs disabled |
+| `['script-a', 'script-b']` | Only the named scripts have their `workers.dev` subdomain and preview URLs disabled |
+
+The kill reads each script's `workers.dev` state first and records only the scripts that have `workers.dev` or preview URLs switched on, with both values. Scripts that are not exposed (cron-only or service-binding-only Workers, say) are never touched, and never made public by a restore.
 
 The kill-switch Worker is always excluded from `'all'` mode — disabling it would make the `POST /restore` endpoint unreachable via `workers.dev`.
 
@@ -510,11 +567,11 @@ blocking: { workers: 'all', pages: [] }
 blocking: { workers: ['my-api-worker', 'my-auth-worker'], pages: [] }
 ```
 
-On restore (via `POST /restore` or auto-reset), all previously disabled scripts have their `workers.dev` subdomain re-enabled automatically.
+On restore (via `POST /restore` or auto-reset), each recorded script gets its recorded `workers.dev` and preview-URL values written back. States written by v2.0.0 (bare script names) still restore as before.
 
 **`blocking.pages`**
 
-Pages projects to block when the kill switch fires. Each project receives a new deployment containing a minimal Worker that returns `503 Service Temporarily Unavailable` for every request. The current production deployment ID is saved first so it can be restored precisely.
+Pages projects to block when the kill switch fires. Each project receives a new, empty production deployment — no files and no Worker — so every path returns Pages' own `404`. The current production deployment ID is saved first so it can be restored precisely. An empty deployment is used rather than a 503 Worker because static requests are free and unmetered, while a Worker would turn every visit into a Functions invocation counted against the 100,000/day Workers quota.
 
 | Value | Effect |
 |-------|--------|
@@ -530,7 +587,33 @@ blocking: { workers: [], pages: ['my-marketing-site', 'my-app-frontend'] }
 
 On restore, each Pages project is rolled back to its pre-kill production deployment via the Cloudflare Pages rollback API.
 
-**API token permissions required:** If `blocking.workers` or `blocking.pages` is non-empty, your API token needs additional permissions beyond the WAF rule. See [API token permissions](#api-token-permissions).
+**`blocking.r2`**
+
+| Value | Effect |
+|-------|--------|
+| `[]` or unset (default) | R2 buckets are left untouched |
+| `'all'` | The public `r2.dev` URL of every bucket on the account is turned off (all jurisdictions) |
+| `['bucket-a', 'bucket-b']` | Only the named buckets have their `r2.dev` URL turned off |
+
+```ts
+blocking: { workers: [], pages: [], r2: 'all' }
+```
+
+On a breach the kill switch turns off each bucket's public `r2.dev` URL, and on restore turns it back on only for buckets whose URL was on before the kill, so private buckets are never made public. A bucket whose state could not be read is still blocked but left off at restore (reported in the alert, so you can re-enable it by hand). Buckets served through a connected custom domain, and S3-API access with R2 API tokens, are **not** blocked. Turning the URL off likely also stops the Class B read operations it serves, but Cloudflare's docs do not confirm that `r2.dev` requests are billed as Class B.
+
+**API token permissions required:** If `blocking.workers`, `blocking.pages` or `blocking.r2` is non-empty, your API token needs additional permissions beyond the WAF rule. See [API token permissions](#api-token-permissions).
+
+---
+
+## How this compares with Cloudflare Spend Management
+
+Cloudflare's [Spend Management](https://blog.cloudflare.com/spend-management/) (Beta, announced November 2026) lets pay-as-you-go customers set spend caps, starting with Workers and Durable Objects. It is a different tool from this one:
+
+- It is a spend cap for pay-as-you-go usage. This kill switch watches free-tier quotas and request counts.
+- The announcement covers Workers and Durable Objects only. It does not describe caps for Pages, R2, KV or D1 free-tier quotas.
+- When a cap is enforced, the product is paused, and the post states that in Workers "Cron Triggers and Queue consumer invocations are paused". A native cap that pauses Workers would therefore pause the Cron Trigger this kill switch runs on, which would stop its own monitoring.
+
+The two can be used together, but check what your cap pauses first. Details may change while Spend Management is in Beta.
 
 ---
 
@@ -540,17 +623,24 @@ On restore, each Pages project is rolled back to its pre-kill production deploym
 |---------|--------|---------------|-----------------|
 | Workers | requests | Daily (UTC midnight → now) | 100,000 / day |
 | Pages | invocations (Functions only) | Daily | 100,000 / day |
+| Workers + Pages | requests, summed (`limits.combined`) | Daily | 100,000 / day (shared Workers Free quota) |
 | KV | reads | Daily | 100,000 / day |
 | KV | writes | Daily | 1,000 / day |
-| KV | storage | Monthly (1st UTC midnight → now) | 1 GB |
-| R2 | storage | Monthly | 10 GB |
+| KV | deletes | Daily | 1,000 / day |
+| KV | lists | Daily | 1,000 / day |
+| KV | storage | Current size (latest gauge, 48 h lookback) | 1 GB |
+| R2 | storage | Current size (latest gauge, 48 h lookback) | 10 GB |
 | R2 | Class A operations | Monthly | 1,000,000 |
 | R2 | Class B operations | Monthly | 10,000,000 |
 | D1 | row reads | Daily | 5,000,000 / day |
 | D1 | row writes | Daily | 100,000 / day |
-| D1 | storage | Monthly | 5 GB |
+| D1 | storage | Current size (latest gauge, 48 h lookback) | 5 GB |
 
-**Window alignment:** The worker uses the same time windows Cloudflare uses for billing. Daily metrics query from UTC midnight of the current day to now. Per-cycle metrics query from UTC midnight of the day the current billing period opened (see [`billingCycleDay`](#billingcycleday)) to now — with `billingCycleDay: 1` that is the 1st of the calendar month.
+**Window alignment:** Daily metrics query from UTC midnight of the current day to now. Per-cycle metrics (R2 Class A/B operations) query from UTC midnight of the day the current billing period opened (see [`billingCycleDay`](#billingcycleday)) to now — with `billingCycleDay: 1` that is the 1st of the calendar month. **Storage metrics are different:** storage is a gauge, not a running total, so the worker reads the latest stored-bytes sample from the last 48 hours and compares that current size to the ceiling. A peak freed weeks ago does not trigger a block. These samples are still tagged with the `cycle` window in reports, so a storage breach resets with the billing period, not at 00:00 UTC.
+
+**One request per tick:** Each tick reads all usage metrics with a single GraphQL request (it used to take 8). If Cloudflare reports an error for one dataset, only that service is marked failed; the others are still evaluated.
+
+**Thresholds and timing:** The default thresholds equal Cloudflare's limits. With 5-minute polling and roughly 1–2 minutes of analytics lag, the switch fires shortly after a limit is crossed, not before it.
 
 **Analytics lag:** Cloudflare's GraphQL Analytics API has a pipeline delay of roughly 1–2 minutes. Usage values seen by the worker may be slightly behind real-time.
 
@@ -558,11 +648,21 @@ On restore, each Pages project is rolled back to its pre-kill production deploym
 
 ---
 
-## Optional: email alerts
+## Optional: alerts (email and webhook)
 
-When the kill switch fires, it can email you a full report listing every breached metric, the WAF rule IDs, and any purge results. Email requires **Cloudflare Email Routing** to be configured on your account.
+When the kill switch fires, it can send you a full report listing every breached metric, the WAF rule IDs, and any purge results. Alerts can go to email, to a webhook, or to both. Email requires **Cloudflare Email Routing** to be configured on your account; a webhook needs no domain.
 
-### Setup
+Alerts are sent on:
+
+- the kill itself
+- later changes while killed (a newly blocked target, a WAF rule that finally deployed, a purge, a kill upgraded to a cycle kill)
+- an auto-reset, whether it succeeded or only partly
+- `POST /restore`
+- failing usage checks — at most once per UTC day
+
+If no channel is configured, none of this is sent: the kill switch still fires and the events only show up in the logs.
+
+### Email setup
 
 **1. Enable Email Routing**
 
@@ -590,7 +690,31 @@ EMAIL_TO   = "you@example.com"            # must match destination_address above
 pnpm run deploy
 ```
 
-If any of `SEND_EMAIL`, `EMAIL_FROM`, or `EMAIL_TO` are absent, email is silently skipped. The kill switch still fires and traffic is still blocked — you just won't get a notification.
+If any of `SEND_EMAIL`, `EMAIL_FROM`, or `EMAIL_TO` are absent, email is silently skipped. The kill switch still fires and traffic is still blocked — you just won't get an email.
+
+### Webhook setup
+
+Alerts can go to a webhook as well as email, no domain needed. Set the URL as a secret — it is a credential, since anyone holding it can post to your channel:
+
+```
+pnpm exec wrangler secret put ALERT_WEBHOOK_URL
+```
+
+ntfy.sh topic URLs, Discord webhook URLs and Slack incoming-webhook URLs work. The payload format is picked from the host; anything else gets ntfy-style plain text with a `Title` header. The URL must be `https`.
+
+| Service | Example URL | Payload |
+|---------|-------------|---------|
+| ntfy | `https://ntfy.sh/<your-long-random-topic>` | Plain text body, subject as the `Title` header |
+| Discord | `https://discord.com/api/webhooks/<id>/<token>` | JSON, truncated to Discord's 2,000-character limit |
+| Slack | `https://hooks.slack.com/services/T000/B000/XXXX` | JSON |
+
+Use a long random ntfy topic: topics are public, so anyone who guesses the name can read your alerts.
+
+Email and webhook are independent: if one channel fails, the other is still tried, and a failed alert never aborts a tick. The webhook is a secret, so `pnpm run validate` cannot see it — it warns when no email is configured, as a reminder to set the webhook, and you can ignore that warning if you have.
+
+### Logs
+
+`wrangler.toml.example` ships with `[observability] enabled = true`, which keeps the Worker's logs (including `console.error` output from failed ticks) in Workers Logs, readable in the dashboard after the fact. On the Free plan that is 200,000 logs per day with 3 days of retention. `pnpm run validate` notes when it is switched off.
 
 ### What the alert looks like
 
@@ -600,8 +724,8 @@ Subject: [Kill Switch] Traffic blocked — limits breached
 Kill Switch triggered. WAF block rule deployed.
 
 Breaches detected:
-  - workers.requests (day): 127,543 observed, limit 100,000 [BLOCK]
-  - r2.storageBytes (month): 10.84 GB observed, limit 10.00 GB [PURGE]
+  - workers.requests (per day): 127,543 observed, limit 100,000 [BLOCK]
+  - r2.storageBytes (per billing cycle): 10.84 GiB observed, limit 10.00 GiB [PURGE]
 
 WAF rule ID : abc123def456
 WAF ruleset : ghi789jkl012
@@ -615,12 +739,12 @@ To restore: POST /restore with Authorization: Bearer <RECOVERY_SECRET>
 
 ---
 
-## Optional: Workers and Pages blocking
+## Optional: Workers, Pages and R2 blocking
 
-By default, the kill switch only deploys a WAF Custom Rule. Traffic on your custom Cloudflare-proxied domains is immediately blocked, but `workers.dev` and `pages.dev` subdomains are **not** affected by WAF rules.
+By default, the kill switch only deploys a WAF Custom Rule. Traffic on your custom Cloudflare-proxied domains is immediately blocked, but `workers.dev` and `pages.dev` subdomains, and public `r2.dev` bucket URLs, are **not** affected by WAF rules.
 
 > **The reverse gap matters too.** `blocking.workers` disables a script's
-> `workers.dev` subdomain and nothing else — a Worker served on a **custom
+> `workers.dev` subdomain and preview URLs and nothing else — a Worker served on a **custom
 > domain or route keeps serving**. Those are covered by the WAF rule instead, so
 > the two mechanisms are complementary rather than redundant:
 >
@@ -643,10 +767,10 @@ blocking: {
 },
 ```
 
-- `'all'` discovers all deployed Workers scripts via the Cloudflare API and disables the `workers.dev` subdomain for each one, **excluding the kill-switch itself** (so `POST /restore` remains reachable).
-- An explicit `string[]` disables only the named scripts.
+- `'all'` discovers all deployed Workers scripts via the Cloudflare API and checks each one, **excluding the kill-switch itself** (so `POST /restore` remains reachable).
+- An explicit `string[]` checks only the named scripts.
 
-Workers subdomain state is saved to KV. On restore, every previously disabled script has its `workers.dev` subdomain re-enabled automatically.
+For each script the kill first reads its `workers.dev` state, and records only the scripts that have `workers.dev` or preview URLs on, with both values. It then turns off both `enabled` and `previews_enabled`. On restore, the recorded values are written back, so cron-only and service-binding-only Workers are never made public. Workers subdomain state is saved to KV; states written by v2.0.0 (bare script names) still restore as before.
 
 **API token requirement:** Add `Account → Workers Scripts → Edit` to your token.
 
@@ -660,25 +784,66 @@ blocking: {
 ```
 
 When the kill switch fires:
-1. The current production deployment ID is fetched from the Cloudflare Pages API and saved to KV.
-2. A new deployment is pushed to the project containing a single Worker module that returns `503 Service Temporarily Unavailable` for every request.
+1. The current production deployment ID and production branch are fetched from the Cloudflare Pages API and saved to KV.
+2. A new, empty deployment (no files, no Worker) is pushed to the production branch, so the site returns `404` on every path. Visitors and search engines see a 404 rather than a 503 — the price of keeping blocked traffic free.
 
-On restore, each project is rolled back to its saved production deployment via the Pages rollback API. The 503 deployment is discarded.
+On restore, each project is rolled back to its saved production deployment via the Pages rollback API. The empty deployment stays in the project's history. Both steps were verified against the live API (direct-upload project, 2026-11-17).
 
 **API token requirement:** Add `Account → Cloudflare Pages → Edit` to your token.
 
-### Combining both
+### Block r2.dev public URLs
+
+```ts
+blocking: {
+  workers: [],
+  pages: [],
+  r2: 'all',   // or an explicit list: ['my-public-assets']
+},
+```
+
+On a breach the kill switch turns off each bucket's public `r2.dev` URL, and on restore turns it back on only for buckets whose URL was on before the kill, so private buckets are never made public. A bucket whose state could not be read is still blocked but left off at restore (reported in the alert so you can re-enable it by hand). Buckets served through a connected custom domain, and S3-API access with R2 API tokens, are **not** blocked.
+
+`'all'` covers buckets in every jurisdiction.
+
+**API token requirement:** Add `Account → Workers R2 Storage → Edit` to your token.
+
+### Combining them
 
 ```ts
 blocking: {
   workers: 'all',
   pages: ['my-marketing-site'],
+  r2: 'all',
 },
 ```
 
-Workers and Pages blocking run in parallel and are both best-effort — a failure in one does not prevent the other from executing. The WAF rule always fires first regardless.
+Workers, Pages and R2 blocking run in parallel and are all best-effort — a failure in one does not prevent the others from executing. The WAF rule always fires first regardless.
 
-**Free-plan subrequest limit:** on the Workers Free plan each invocation is capped at 50 subrequests, and every Cloudflare API call, KV operation, and R2 list/delete made during a kill counts against it. A kill with `workers: 'all'` and `pages: 'all'` on an account with many scripts and projects — especially combined with an R2/D1 purge — can exceed the cap, leaving some scripts or projects unblocked (their failures are logged and skipped). If you have more than roughly 30 scripts + projects combined, prefer explicit lists of the ones that matter, or run the kill switch on a paid plan (10,000 subrequests).
+### While killed
+
+The block is not a one-shot. Every tick while killed:
+
+- Workers, Pages projects and R2 buckets created since the kill are blocked (with `'all'`).
+- Blocks that failed are retried.
+- A WAF rule that never deployed is retried — an existing kill-switch rule is adopted rather than stacked on top.
+- A purge runs, at most once per service, if `purgeAt` is reached after the kill.
+
+KV is written only when something changed, and an alert is sent only when something new happened.
+
+**Known gap:** a recorded Worker that is re-enabled by a redeploy (for example `wrangler deploy` with `workers_dev = true`), or a recorded Pages project that is redeployed during the kill, is **not** re-blocked.
+
+### Free-plan subrequest budget
+
+On the Workers Free plan each invocation is capped at 50 subrequests, and every Cloudflare API call, KV operation, and R2 list/delete counts against it. Roughly what a tick costs:
+
+| Situation | Subrequests |
+|-----------|-------------|
+| Quiet tick | 1 GraphQL request |
+| Each tick while killed | plus list calls for the blocking set to `'all'`: one Workers scripts list, one Pages projects list, and up to 5 R2 bucket lists (one per jurisdiction) |
+| The first kill | plus, per Worker, one GET and (if exposed) one POST; per Pages project, one GET and one deploy; per R2 bucket, one GET and (if public) one PUT; plus the WAF calls |
+| Restore | one call per recorded item |
+
+A purge adds its own R2/D1 calls on top. Roughly 20 targets in total (Workers + Pages projects + R2 buckets) is a practical ceiling on the Free plan. Beyond that some blocks may fail (failures are logged, and retried on the next tick), so list the targets that matter explicitly, or run the kill switch on a paid plan (10,000 subrequests).
 
 ---
 
@@ -802,7 +967,7 @@ Two actions are available per table:
 | `DELETE_ALL` | `DELETE FROM \`table\`` | Removes all rows. Table structure and indexes are preserved. |
 | `DROP` | `DROP TABLE IF EXISTS \`table\`` | Removes the table entirely including its schema. |
 
-Tables are processed in the order listed. If one table fails, the rest still run. Errors are reported in the email alert.
+Tables are processed in the order listed. If one table fails, the rest still run. Errors are reported in the alert.
 
 **Step 3 — Add the D1 binding to wrangler.toml**
 
@@ -826,26 +991,32 @@ pnpm run deploy
 
 There are two ways to lift a kill-switch block:
 
-### Auto-reset (start of the billing cycle)
+### Auto-reset (when the quota resets)
 
 With `autoResetOnBillingCycle: true` (the default), the worker automatically
-recovers once a new billing period opens, provided:
+recovers once the quota that caused the kill has reset, provided:
 
 - The current KV state is `killed`
-- `billingCycleDay` is a valid integer 1–31
-- The original kill time falls in a previous billing period
+- The reset is due: for a kill caused only by daily quotas, the kill time predates
+  today's 00:00 UTC; for a kill involving any per-cycle limit (and for states
+  written by v2.0.0), it predates the start of the billing period
+  (`billingCycleDay` must then be a valid integer 1–31)
+- Nothing is still over a limit — usage is read on every tick, even while killed,
+  and a limit that is still exceeded keeps the kill switch killed instead of
+  restoring and re-killing
 
-On the first cron tick on or after day `billingCycleDay`:
+On the first cron tick that meets these conditions:
 1. Pages projects are rolled back to their pre-kill deployments (if any were blocked)
-2. Workers scripts have their `workers.dev` subdomain re-enabled (if any were disabled)
-3. The WAF rule is deleted via the Cloudflare API
-4. KV state is set to `active`
-5. Normal usage monitoring resumes
+2. Workers scripts get their recorded `workers.dev` and preview-URL values written back (if any were disabled)
+3. R2 buckets whose `r2.dev` URL was on get it turned back on (if any were blocked)
+4. The WAF rule is deleted via the Cloudflare API
+5. KV state is set to `active`
+6. Normal usage monitoring resumes
 
-This aligns with Cloudflare's billing reset — your limits refill when the new
-period opens, so the worker unlocks then too. The original kill time is preserved
-across failed restore attempts, so a partial failure retries on the next tick
-instead of suppressing auto-reset for the rest of the period.
+See [`autoResetOnBillingCycle`](#autoresetonbillingcycle) for which limits reset
+when. The original kill time is preserved across failed restore attempts, so a
+partial failure retries on the next tick instead of suppressing auto-reset for the
+rest of the period.
 
 ### Manual restore via webhook
 
@@ -886,9 +1057,13 @@ curl -s -X POST https://cloudflare-killswitch.your-subdomain.workers.dev/restore
 { "restored": false, "previousReason": "2 block breach(es)", "errors": ["workers not re-enabled: my-api"] }
 ```
 
+Both the `200` and the `502` can carry a `notes` array for things that are not failures, such as R2 buckets deliberately left off because their state before the kill was unknown.
+
 Only the failed items remain recorded in the killed state — call `POST /restore` again to retry just those.
 
-The call is idempotent — if the worker is already `active`, it returns `200` with `restored: true` anyway. Requests are rate-limited to 10 per minute per client IP (`429` with a `Retry-After` header beyond that).
+The call is idempotent — if the worker is already `active`, it returns `200` with `restored: true` anyway. Requests are rate-limited to 10 per 60 seconds per client IP (`429` with a `Retry-After` header beyond that); every request counts, not just failed ones.
+
+The limit uses the Workers Rate Limiting binding `RESTORE_RATE_LIMITER`, declared in the `[[ratelimits]]` block of `wrangler.toml.example` (needs wrangler 4.36+; counts are per Cloudflare location, so it is a soft cap). Without the binding an in-memory per-isolate limiter is used instead, and `pnpm run validate` warns. Rate limiting never writes to KV, so rotating IPs cannot burn the account's KV write quota. Cloudflare's docs do not state whether the Rate Limiting binding is available on the Free plan — check that `wrangler deploy` accepts the block on your account.
 
 The `POST /restore` endpoint is **exempt from the WAF block rule** when `enableRecoveryWebhook: true`, so it remains reachable even while all other traffic is blocked.
 
@@ -952,7 +1127,8 @@ Read a non-silent tail as follows:
 | `Metric fetch errors (no breach detected):` | The Worker cannot read your usage, so **it will never fire**. Almost always an API-token problem — see below. |
 | `scheduled tick failed:` | An unexpected error before monitoring began, e.g. KV unreachable. The message names the cause. |
 | No invocation at all within 5 minutes | The cron trigger is not registered — go back to check 2. |
-| `waf deploy error:` / `block-workers error:` / `block-pages error:` | A breach **was** detected and the Worker tried to act, but an action failed. Check that permission on the token. |
+| `waf deploy error:` / `block-workers error:` / `block-pages error:` / `block-r2 error:` | A breach **was** detected and the Worker tried to act, but an action failed. Check that permission on the token. While killed, failed blocks are retried every tick. |
+| `auto-reset is due but usage is still over a limit — staying killed` | The quota that caused the kill has reset, but a limit is still exceeded, so the block stays in place. |
 
 If you see `Metric fetch errors`, the message carries the GraphQL error. A `403` means the token is missing `Account Analytics: Read` at the **account** level — the single most common misconfiguration, because it is the one permission the Worker needs no matter how everything else is set. See [API token permissions](#api-token-permissions).
 
@@ -972,16 +1148,21 @@ The `--binding` form reads the namespace id out of your `wrangler.toml`, so ther
   "timestamp": "2026-09-08T09:05:00.000Z",
   "killedAt": "2026-09-08T09:05:00.000Z",
   "reason": "1 block breach(es)",
+  "resetWindow": "day",
+  "purgedServices": [],
   "wafRuleId": "...",
   "wafRulesetId": "...",
-  "disabledWorkerScripts": ["my-api", "my-cron"],
-  "blockedPagesProjects": [{ "project": "my-site", "previousDeploymentId": "..." }]
+  "disabledWorkerScripts": [{ "script": "my-api", "enabled": true, "previewsEnabled": false }],
+  "blockedPagesProjects": [
+    { "project": "my-site", "previousDeploymentId": "...", "productionBranch": "main" }
+  ],
+  "blockedR2Buckets": [{ "bucket": "my-public-assets" }]
 }
 ```
 
-`reason` is deliberately just a count — the per-metric breakdown (`workers.requests (per day): 104,213 observed, limit 100,000 [BLOCK]`) goes to the alert email and the logs, so enable [email alerts](#optional-email-alerts) if you want to know *which* limit went.
+`reason` is deliberately just a count — the per-metric breakdown (`workers.requests (per day): 104,213 observed, limit 100,000 [BLOCK]`) goes to the alert and the logs, so enable [email or webhook alerts](#optional-alerts-email-and-webhook) if you want to know *which* limit went.
 
-`killedAt` is the auto-reset anchor, and `wafRuleId` / `disabledWorkerScripts` / `blockedPagesProjects` are the undo list — recovery replays exactly what is recorded here, which is why the Worker writes its intent *before* it mutates anything.
+`killedAt` and `resetWindow` decide when auto-reset is due, and `wafRuleId` / `disabledWorkerScripts` / `blockedPagesProjects` / `blockedR2Buckets` are the undo list — recovery replays exactly what is recorded here, which is why the Worker writes its intent *before* it mutates anything.
 
 Note that an absent key proves only that nothing has fired. It does **not** prove the Worker can read your usage — that is what check 3 is for.
 
@@ -989,7 +1170,7 @@ Note that an absent key proves only that nothing has fired. It does **not** prov
 
 The checks above confirm the monitoring path. Only a real breach confirms the *blocking* path, and you can force one safely on a test account by lowering a threshold below your current usage.
 
-> **Read this first.** With `blocking.workers: 'all'` the drill disables the `workers.dev` subdomain of every Worker on the account except the kill switch, and with `blocking.pages: 'all'` it overwrites every Pages production deployment with a 503. Do not drill on an account serving anything you care about. If `purgeAt` is set on any metric, **remove it before drilling** — purge deletes R2 objects and D1 rows, and no restore path brings those back.
+> **Read this first.** With `blocking.workers: 'all'` the drill disables the `workers.dev` subdomain of every Worker on the account except the kill switch, and with `blocking.pages: 'all'` it replaces every Pages production deployment with an empty one (404). Do not drill on an account serving anything you care about. If `purgeAt` is set on any metric, **remove it before drilling** — purge deletes R2 objects and D1 rows, and no restore path brings those back.
 
 1. **Give yourself a way back in first.** Set `enableRecoveryWebhook: true` in `src/config.ts`, run `pnpm exec wrangler secret put RECOVERY_SECRET` (any long random string), and deploy. Without this, undoing the drill means re-enabling every Worker and Pages project by hand in the dashboard.
 
@@ -1048,6 +1229,12 @@ Every metric this Worker reads comes from the account-scoped GraphQL Analytics A
 | Permission group | Permission | Level |
 |------------------|-----------|-------|
 | Account → Cloudflare Pages | Edit | Account |
+
+**If `blocking.r2` is non-empty, add:**
+
+| Permission group | Permission | Level |
+|------------------|-----------|-------|
+| Account → Workers R2 Storage | Edit | Account |
 
 Account membership alone does **not** grant GraphQL Analytics access to an API token — `Account Analytics: Read` above is required, and account-scoped datasets need it at the account level rather than scoped to a single zone.
 
@@ -1135,53 +1322,46 @@ limits: {
 },
 ```
 
-**`src/metrics/myservice.ts`** — implement the module:
+**`src/metrics/myservice.ts`** — implement the module. A module does not make its own request: it describes the dataset it needs (`query`), and the collector merges every module's selection into the single per-tick GraphQL request (see [Metrics and default limits](#metrics-and-default-limits)):
 
 ```ts
-import type { AppConfig, Breach, MetricSample, ServiceModule } from '../types.js';
-import type { Env } from '../types.js';
-import { gql } from '../graphql/client.js';
+import type { AccountData, AppConfig, Breach, MetricSample, ServiceModule } from '../types.js';
 import { utcDayStart, utcNow } from '../graphql/queries.js';
+import { evaluateSample } from './evaluate.js';
 
-const QUERY = `
-  query MyServiceUsage($accountId: String!, $since: String!, $until: String!) {
-    viewer {
-      accounts(filter: { accountTag: $accountId }) {
-        myServiceDataset(filter: { datetime_geq: $since, datetime_leq: $until }) {
-          sum { requests }
-        }
-      }
-    }
-  }
-`;
+interface MyServiceAccount {
+  myServiceDataset?: { sum: { requests: number } }[];
+}
 
 export const myServiceModule: ServiceModule = {
   name: 'myservice',
 
-  async fetchUsage(env: Env, cfg: AppConfig): Promise<MetricSample[]> {
-    const data = await gql</* response type */>(env, QUERY, {
-      accountId: env.CLOUDFLARE_ACCOUNT_ID,
-      since: utcDayStart(),
-      until: utcNow(),
-    });
-    const requests = data?.viewer?.accounts?.[0]?.myServiceDataset?.[0]?.sum?.requests ?? 0;
+  query() {
+    return {
+      // Response keys this selection adds — a GraphQL error whose path runs
+      // through one of them marks only this module as failed.
+      keys: ['myServiceDataset'],
+      selection: `myServiceDataset(filter: { datetime_geq: $myserviceStart, datetime_leq: $myserviceEnd }) {
+        sum { requests }
+      }`,
+      // Variable names must be unique across modules: prefix them with the module name.
+      variables: {
+        myserviceStart: { type: 'String!', value: utcDayStart() },
+        myserviceEnd: { type: 'String!', value: utcNow() },
+      },
+    };
+  },
+
+  parse(account: AccountData): MetricSample[] {
+    const rows = (account as MyServiceAccount).myServiceDataset ?? [];
+    const requests = rows.reduce((sum, r) => sum + r.sum.requests, 0);
     return [{ metric: 'requests', value: requests, window: 'day' }];
   },
 
   evaluate(samples: MetricSample[], cfg: AppConfig): Breach[] {
-    const breaches: Breach[] = [];
-    for (const sample of samples) {
-      const threshold = cfg.limits.myservice[sample.metric as keyof typeof cfg.limits.myservice];
-      if (!threshold) continue;
-      if (sample.value >= (threshold.purgeAt ?? Infinity)) {
-        breaches.push({ service: 'myservice', metric: sample.metric, observed: sample.value,
-                        limit: threshold.purgeAt!, severity: 'purge', window: sample.window });
-      } else if (sample.value >= threshold.blockAt) {
-        breaches.push({ service: 'myservice', metric: sample.metric, observed: sample.value,
-                        limit: threshold.blockAt, severity: 'block', window: sample.window });
-      }
-    }
-    return breaches;
+    return samples.flatMap((s) =>
+      evaluateSample('myservice', s, cfg.limits.myservice[s.metric as keyof typeof cfg.limits.myservice]),
+    );
   },
 };
 ```
@@ -1230,9 +1410,15 @@ The `Authorization` header is missing or the Bearer token doesn't match `RECOVER
 - Check that `EMAIL_FROM` and `EMAIL_TO` appear in the `[vars]` section of `wrangler.toml` and that you redeployed after adding them
 - If any of the three vars are missing the worker silently skips email — it does not error
 
+**Webhook alerts are not arriving**
+
+- `ALERT_WEBHOOK_URL` must be set as a secret (`pnpm exec wrangler secret put ALERT_WEBHOOK_URL`) and be an `https` URL; anything else is skipped with a log line
+- A non-2xx response from the service is logged as `webhook alert failed: Webhook returned HTTP <status>` — check `wrangler tail` or Workers Logs
+- Email and webhook are independent, so one failing does not stop the other
+
 **Purge ran but objects are still in R2 / rows are still in D1**
 
-Check the email alert for per-bucket or per-table error lines. Common causes:
+Check the alert (email or webhook) for per-bucket or per-table error lines. Common causes:
 - `bindingName` in `config.ts` does not exactly match the `binding =` value in `wrangler.toml` (case-sensitive)
 - The binding exists in `config.ts` but not in `wrangler.toml` — add it and redeploy
 - The R2 prefix in `prefixes` does not match any object keys in the bucket

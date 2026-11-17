@@ -18,6 +18,8 @@ const LOW_CFG: AppConfig = {
     kv: {
       reads: { blockAt: 1_000_000 },
       writes: { blockAt: 1_000_000 },
+      deletes: { blockAt: 1_000_000 },
+      lists: { blockAt: 1_000_000 },
       storageBytes: { blockAt: 1_000_000_000_000 },
     },
     r2: {
@@ -70,6 +72,18 @@ function mockGraphqlResponse(requests: number) {
   };
 }
 
+/** A script that is publicly reachable on workers.dev, previews off. */
+function subdomainGet() {
+  return new Response(
+    JSON.stringify({
+      success: true,
+      errors: [],
+      result: { enabled: true, previews_enabled: false },
+    }),
+    { status: 200 },
+  );
+}
+
 function wafResponse(rulesetId: string, ruleId: string) {
   return {
     success: true,
@@ -79,10 +93,11 @@ function wafResponse(rulesetId: string, ruleId: string) {
 }
 
 function routedMock(requests: number, rulesetId: string, ruleId: string) {
-  return vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+  return vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.includes('graphql'))
       return new Response(JSON.stringify(mockGraphqlResponse(requests)), { status: 200 });
+    if (url.includes('/subdomain') && init?.method !== 'POST') return subdomainGet();
     if (url.includes('rulesets/phases'))
       return new Response(JSON.stringify(wafResponse(rulesetId, 'rule-0')), { status: 200 });
     if (url.includes('/rules'))
@@ -158,7 +173,9 @@ describe('runScheduled — scope none (no zone on the account)', () => {
     expect(state.status).toBe('killed');
     expect(state.wafRuleId).toBeUndefined();
     expect(state.wafRulesetId).toBeUndefined();
-    expect(state.disabledWorkerScripts).toEqual(['victim-worker']);
+    expect(state.disabledWorkerScripts).toEqual([
+      { script: 'victim-worker', enabled: true, previewsEnabled: false },
+    ]);
 
     const urls = vi.mocked(fetch).mock.calls.map(([input]) => urlOf(input));
     expect(urls.some((u) => u.includes('rulesets'))).toBe(false);
@@ -168,14 +185,20 @@ describe('runScheduled — scope none (no zone on the account)', () => {
 describe('runScheduled — already killed', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('no-ops when status is killed and no auto-reset', async () => {
-    const fetchSpy = vi.fn();
-    vi.stubGlobal('fetch', fetchSpy);
+  it('leaves the state untouched when killed, no auto-reset, and every call fails', async () => {
+    // A killed tick now fetches usage and retries blocks; with the network down
+    // and nothing left to retry, the recorded state must not change.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
 
     await writeKilled(env, { reason: 'prior', wafRuleId: 'r', wafRulesetId: 'rs' });
-    await runScheduled(env, { ...LOW_CFG, autoResetOnBillingCycle: false });
+    const before = await readState(env);
+    await runScheduled(env, {
+      ...LOW_CFG,
+      autoResetOnBillingCycle: false,
+      blocking: { workers: [], pages: [] },
+    });
 
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await readState(env)).toEqual(before);
   });
 });
 
@@ -183,7 +206,7 @@ describe('runScheduled — kill durability', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   /** The window between "actions performed" and "actions recorded" is the one
-   *  place an isolate death leaves Workers dark and Pages serving 503 with
+   *  place an isolate death leaves Workers dark and Pages serving the empty kill deployment with
    *  nothing in state to undo them. Targets must therefore be persisted before
    *  the first mutating call. */
   it('records its targets before it mutates anything', async () => {
@@ -197,6 +220,7 @@ describe('runScheduled — kill durability', () => {
         if (url.includes('graphql')) {
           return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
         }
+        if (url.includes('/subdomain') && init?.method !== 'POST') return subdomainGet();
         if (url.includes('/subdomain')) {
           events.push('mutate:subdomain');
           return new Response(JSON.stringify({ success: true, errors: [], result: {} }), {
@@ -231,7 +255,7 @@ describe('runScheduled — kill durability', () => {
       .mockImplementation(async (key: string, value: Parameters<KVNamespace['put']>[1]) => {
         if (key === 'state' && typeof value === 'string') {
           const parsed = JSON.parse(value) as {
-            disabledWorkerScripts?: string[];
+            disabledWorkerScripts?: unknown[];
             blockedPagesProjects?: { project: string }[];
           };
           if (parsed.disabledWorkerScripts?.length || parsed.blockedPagesProjects?.length) {
@@ -262,9 +286,11 @@ describe('runScheduled — kill durability', () => {
     expect(firstRecord).toBeLessThan(firstMutation);
 
     const state = await readState(env);
-    expect(state.disabledWorkerScripts).toEqual(['victim']);
+    expect(state.disabledWorkerScripts).toEqual([
+      { script: 'victim', enabled: true, previewsEnabled: false },
+    ]);
     expect(state.blockedPagesProjects).toEqual([
-      { project: 'victim-pages', previousDeploymentId: 'prev-1' },
+      { project: 'victim-pages', previousDeploymentId: 'prev-1', productionBranch: 'main' },
     ]);
     await writeActive(env);
   });
@@ -272,12 +298,13 @@ describe('runScheduled — kill durability', () => {
   it('keeps a target recorded even when blocking it fails', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         if (url.includes('graphql')) {
           return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
         }
+        if (url.includes('/subdomain') && init?.method !== 'POST') return subdomainGet();
         if (url.includes('/subdomain')) {
           // The disable fails, but the script may still have been disabled before
           // the response was lost — dropping it from state would leave it dark.
@@ -301,7 +328,9 @@ describe('runScheduled — kill durability', () => {
 
     const state = await readState(env);
     expect(state.status).toBe('killed');
-    expect(state.disabledWorkerScripts).toEqual(['stubborn']);
+    expect(state.disabledWorkerScripts).toEqual([
+      { script: 'stubborn', enabled: true, previewsEnabled: false },
+    ]);
     await writeActive(env);
   });
 
@@ -314,6 +343,7 @@ describe('runScheduled — kill durability', () => {
         if (url.includes('graphql')) {
           return new Response(JSON.stringify(mockGraphqlResponse(500)), { status: 200 });
         }
+        if (url.includes('/subdomain')) return subdomainGet();
         if (url.includes('rulesets')) {
           return new Response(
             JSON.stringify({
@@ -340,7 +370,9 @@ describe('runScheduled — kill durability', () => {
     expect(state.status).toBe('killed');
     expect(state.wafRuleId).toBeUndefined();
     // The independent mitigation must not be skipped just because WAF failed.
-    expect(state.disabledWorkerScripts).toEqual(['victim']);
+    expect(state.disabledWorkerScripts).toEqual([
+      { script: 'victim', enabled: true, previewsEnabled: false },
+    ]);
     await writeActive(env);
   });
 });

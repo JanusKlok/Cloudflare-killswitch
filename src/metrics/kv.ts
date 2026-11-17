@@ -1,105 +1,75 @@
-import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
-import { gql } from '../graphql/client.js';
+import type { AccountData, AppConfig, Breach, MetricSample, ServiceModule } from '../types.js';
 import { utcDayStart, utcDaysAgo, utcNow, utcToday } from '../graphql/queries.js';
 import { STORAGE_WINDOW_DAYS, sumPerEntityMax } from './storage.js';
 import { evaluateSample } from './evaluate.js';
 
-interface KvOpsData {
-  viewer: {
-    accounts: {
-      kvOperationsAdaptiveGroups: {
-        sum: { requests: number };
-        dimensions: { actionType: string };
-      }[];
-    }[];
-  };
-}
-
-interface KvStorageData {
-  viewer: {
-    accounts: {
-      kvStorageAdaptiveGroups: {
-        max: { byteCount: number };
-        dimensions: { namespaceId: string };
-      }[];
-    }[];
-  };
+interface KvAccount {
+  kvOperationsAdaptiveGroups?: {
+    sum: { requests: number };
+    dimensions: { actionType: string };
+  }[];
+  kvStorageAdaptiveGroups?: {
+    max: { byteCount: number };
+    dimensions: { namespaceId: string };
+  }[];
 }
 
 export const kvModule: ServiceModule = {
   name: 'kv',
 
-  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
-    const [opsData, storageData] = await Promise.all([
-      gql<KvOpsData>(
-        env,
-        `query KvOps($accountTag: String!, $start: String!, $end: String!) {
-          viewer {
-            accounts(filter: { accountTag: $accountTag }) {
-              kvOperationsAdaptiveGroups(
-                limit: 10000
-                filter: { datetime_geq: $start, datetime_leq: $end }
-              ) {
-                sum { requests }
-                dimensions { actionType }
-              }
-            }
-          }
-        }`,
-        { accountTag: env.CLOUDFLARE_ACCOUNT_ID, start: utcDayStart(), end: utcNow() },
-      ),
-      gql<KvStorageData>(
-        env,
-        `query KvStorage($accountTag: String!, $start: String!, $end: String!) {
-          viewer {
-            accounts(filter: { accountTag: $accountTag }) {
-              kvStorageAdaptiveGroups(
-                limit: 10000
-                filter: { date_geq: $start, date_leq: $end }
-              ) {
-                max { byteCount }
-                dimensions { namespaceId }
-              }
-            }
-          }
-        }`,
-        {
-          accountTag: env.CLOUDFLARE_ACCOUNT_ID,
-          start: utcDaysAgo(STORAGE_WINDOW_DAYS),
-          end: utcToday(),
-        },
-      ),
-    ]);
+  query() {
+    return {
+      keys: ['kvOperationsAdaptiveGroups', 'kvStorageAdaptiveGroups'],
+      selection: `kvOperationsAdaptiveGroups(
+        limit: 10000
+        filter: { datetime_geq: $kvOpsStart, datetime_leq: $kvOpsEnd }
+      ) {
+        sum { requests }
+        dimensions { actionType }
+      }
+      kvStorageAdaptiveGroups(
+        limit: 10000
+        filter: { date_geq: $kvStorageStart, date_leq: $kvStorageEnd }
+      ) {
+        max { byteCount }
+        dimensions { namespaceId }
+      }`,
+      variables: {
+        kvOpsStart: { type: 'String!', value: utcDayStart() },
+        kvOpsEnd: { type: 'String!', value: utcNow() },
+        kvStorageStart: { type: 'String!', value: utcDaysAgo(STORAGE_WINDOW_DAYS) },
+        kvStorageEnd: { type: 'String!', value: utcToday() },
+      },
+    };
+  },
 
-    const opsRows = opsData.viewer.accounts[0]?.kvOperationsAdaptiveGroups ?? [];
-    let reads = 0;
-    let writes = 0;
+  parse(account: AccountData): MetricSample[] {
+    const { kvOperationsAdaptiveGroups, kvStorageAdaptiveGroups } = account as KvAccount;
+    const opsRows = kvOperationsAdaptiveGroups ?? [];
+    const counts = { read: 0, write: 0, delete: 0, list: 0 };
     for (const row of opsRows) {
       const t = row.dimensions.actionType;
-      if (t === 'read') reads += row.sum.requests;
-      // Cloudflare meters write, delete and list separately; they are summed
-      // into one counter here, so the effective `writes` limit is the sum of
-      // all three. Deliberately conservative — it fires early, not late.
-      else if (t === 'write' || t === 'delete' || t === 'list') writes += row.sum.requests;
+      if (Object.hasOwn(counts, t)) counts[t as keyof typeof counts] += row.sum.requests;
       else
         console.warn(
           `kv: unrecognised actionType "${t}" (${row.sum.requests} requests) not counted`,
         );
     }
 
-    const storageRows = storageData.viewer.accounts[0]?.kvStorageAdaptiveGroups ?? [];
     const storageBytes = sumPerEntityMax(
       'kv',
       'kvStorageAdaptiveGroups.max.byteCount',
-      storageRows,
+      kvStorageAdaptiveGroups ?? [],
       (r) => r.dimensions.namespaceId,
       (r) => r.max.byteCount,
       opsRows.length > 0,
     );
 
     return [
-      { metric: 'reads', value: reads, window: 'day' },
-      { metric: 'writes', value: writes, window: 'day' },
+      { metric: 'reads', value: counts.read, window: 'day' },
+      { metric: 'writes', value: counts.write, window: 'day' },
+      { metric: 'deletes', value: counts.delete, window: 'day' },
+      { metric: 'lists', value: counts.list, window: 'day' },
       { metric: 'storageBytes', value: storageBytes, window: 'cycle' },
     ];
   },

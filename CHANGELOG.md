@@ -4,6 +4,31 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **R2 blocking (`blocking.r2: 'all' | string[]`).** A kill now turns off each bucket's public `r2.dev` URL. Only buckets whose URL was on before the kill are recorded and re-enabled at restore, so a private bucket is never made public. A bucket whose prior state could not be read is blocked but left off at restore, and reported. Custom domains and S3-API access are out of reach and documented as such. Needs the `Workers R2 Storage: Edit` token permission (listed by the validator).
+- **Webhook alerts (`ALERT_WEBHOOK_URL` secret).** Works without a domain: ntfy, Discord and Slack URLs are recognised by host. Alerts now also go out on later killed-tick changes, on auto-reset (success or partial failure), on `/restore`, and when usage checks fail (at most once per UTC day, one KV write). The validator warns when no email channel is configured and notes when `[observability]` is off; `wrangler.toml.example` enables Workers Logs.
+- **Combined Workers + Pages Functions limit (`limits.combined.requests`).** Pages Functions requests count toward the same Workers Free 100,000/day quota, which the two separate checks could not catch (60k + 60k). Optional; the example config sets it to 100,000 and the validator notes when it is missing.
+
+### Changed
+
+- **Blocked Pages projects get an empty deployment instead of a 503 Worker.** Every path now serves Pages' own 404. Static requests are free and unmetered, whereas the 503 Worker turned each visit to a blocked site into a Functions invocation counted against the 100,000/day Workers quota. `blocking.pagesCompatibilityDate` is now ignored. Deployment and rollback verified against the live API.
+- **Breaking: KV deletes and lists have their own limits (`limits.kv.deletes`, `limits.kv.lists`, 1,000/day each on Free).** They used to be added into `writes`, so 400 writes + 400 deletes + 300 lists killed although no real quota was hit. Existing configs must add both keys.
+
+- **Daily breaches auto-reset at 00:00 UTC.** A kill caused only by daily quotas now resets on the first tick after UTC midnight instead of up to a month later at the billing anniversary. A kill involving any per-cycle breach still resets with the billing period, and a daily kill is upgraded if a per-cycle limit is breached later. `autoResetOnBillingCycle` remains the single on/off switch. States written by 2.0.0 keep resetting per billing cycle.
+- **Auto-reset only restores when nothing is still over a limit.** Previously a storage ceiling still exceeded after the boundary was restored and immediately re-killed.
+- **The kill is no longer one-shot.** Usage is checked on every tick, killed or not. While killed, each tick blocks Workers, Pages projects and R2 buckets created since the kill, retries blocks that failed, retries a WAF rule that never deployed (adopting an existing kill-switch rule instead of stacking a second), and runs a `purgeAt` purge at most once per service. KV is written only when the state changed. States written by 2.0.0 never purge on a later tick.
+- **A partly failed restore is finished, not re-killed.** The remnant state is marked `restorePending`, and later ticks retry the restore (unless something is over a limit again) instead of re-blocking what was already undone. Retries that fail on the same items no longer rewrite KV, re-alert, or nest the `reason` string. 2.0.0 remnants are recognised by their reason prefix.
+- **One GraphQL request per tick instead of eight.** Errors are attributed to the failing dataset via the error path, so one failing dataset still fails only its own service; unattributable errors fall back to per-service requests.
+- **`/restore` rate limiting uses the Workers Rate Limiting binding** (`RESTORE_RATE_LIMITER`, `[[ratelimits]]` in `wrangler.toml.example`), with an in-memory per-isolate fallback when the binding is absent. Rate limiting no longer writes to KV, so rotating IPs can no longer burn the 1,000 KV writes/day and trigger a kill.
+- **Fetch retries also cover HTTP 429** (honouring `Retry-After` up to 2 s) and every attempt has a 10 s timeout, so one hung API call can no longer stall a tick.
+- **R2 operation classes match Cloudflare's pricing page.** List operations are Class A, deletes and `AbortMultipartUpload` are free, and an unrecognised operation now counts as Class A (fails safe) instead of being ignored.
+
+### Fixed
+
+- **Restore no longer makes Workers public that never were.** The kill reads each script's `workers.dev` state first and records only exposed scripts with their `enabled` and `previews_enabled` values. The kill now also turns off preview URLs, and restore writes back exactly what was recorded. Killed states from 2.0.0 (bare script names) still restore as before.
+- README: `enableRecoveryWebhook` defaults to `false`, storage metrics are a current-size gauge (48 h lookback) rather than a monthly counter, the R2 Class A description was wrong, and a comparison with Cloudflare Spend Management was added.
+
 ## [2.0.0] — 2026-09-08
 
 ### Added

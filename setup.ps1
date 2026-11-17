@@ -230,9 +230,10 @@ if ($billingDay -gt 28) {
 }
 
 # ── Auto-reset ────────────────────────────────────────────────────────────────
-Write-Section "Billing-cycle auto-reset (optional)"
-Write-Host "  Automatically lifts the block on the first check on or after day"
-Write-Host "  $billingDay of each month, once the quota that triggered it has reset.`n"
+Write-Section "Auto-reset (optional)"
+Write-Host "  Automatically lifts the block once the quota that triggered it has reset:"
+Write-Host "  after 00:00 UTC for daily quotas, otherwise on or after day $billingDay"
+Write-Host "  of each month. Never while something is still over a limit.`n"
 $autoReset = Ask-YesNo "Enable auto-reset?" -Default $true
 
 # ── Apply ───────────────────────────────────────────────────────────────────────

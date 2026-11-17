@@ -1,18 +1,6 @@
 import type { AppConfig, Env } from '../types.js';
 import { cfFetch } from '../util/cf-api.js';
 
-// Minimal ESM Worker that returns 503 for every request.
-const KILL_WORKER_SRC = `export default {
-  async fetch() {
-    return new Response("Service temporarily unavailable", {
-      status: 503,
-      headers: { "Content-Type": "text/plain", "Retry-After": "3600" },
-    });
-  },
-};`;
-
-const DEFAULT_COMPAT_DATE = '2025-01-01';
-
 interface PagesProject {
   canonical_deployment?: { id: string } | null;
   production_branch?: string;
@@ -22,28 +10,11 @@ interface PagesProjectListItem {
   name: string;
 }
 
-/** Build a _worker.bundle blob: a multipart body containing metadata + a 503 Worker module. */
-async function buildKillBundle(compatibilityDate: string): Promise<Blob> {
-  const inner = new FormData();
-  inner.append(
-    'metadata',
-    JSON.stringify({ compatibility_date: compatibilityDate, main_module: 'index.js' }),
-  );
-  inner.append(
-    'index.js',
-    new Blob([KILL_WORKER_SRC], { type: 'application/javascript+module' }),
-    'index.js',
-  );
-  return new Response(inner).blob();
-}
-
 export interface BlockedPage {
   project: string;
   previousDeploymentId: string;
 }
 
-/** Blocks each Pages project in cfg.blocking.pages by deploying a 503 maintenance Worker.
- *  Returns metadata needed to restore each project later.  Failures are logged and skipped. */
 export interface PageTarget extends BlockedPage {
   productionBranch: string;
 }
@@ -51,8 +22,16 @@ export interface PageTarget extends BlockedPage {
 /** Resolves cfg.blocking.pages into concrete projects and reads the deployment
  *  each must later be rolled back to, without changing anything.  Split from
  *  blockPages so the caller can record these first: previousDeploymentId is
- *  unrecoverable once the 503 bundle becomes the live deployment. */
-export async function resolvePageTargets(env: Env, cfg: AppConfig): Promise<PageTarget[]> {
+ *  unrecoverable once the empty kill deployment becomes the live one.
+ *
+ *  Projects in `known` (already recorded by this kill) are dropped BEFORE the
+ *  per-project GET: their current deployment is the empty one, so inspecting
+ *  them again would record the wrong rollback target — and cost a subrequest. */
+export async function resolvePageTargets(
+  env: Env,
+  cfg: AppConfig,
+  known: ReadonlySet<string> = new Set(),
+): Promise<PageTarget[]> {
   const pagesCfg = cfg.blocking.pages;
   const accountId = encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID);
   const token = env.CLOUDFLARE_API_TOKEN;
@@ -67,6 +46,7 @@ export async function resolvePageTargets(env: Env, cfg: AppConfig): Promise<Page
   } else {
     projectNames = [...pagesCfg];
   }
+  projectNames = projectNames.filter((name) => !known.has(name));
   if (projectNames.length === 0) return [];
 
   const discovered = await Promise.allSettled(
@@ -107,19 +87,17 @@ export async function resolvePageTargets(env: Env, cfg: AppConfig): Promise<Page
   return targets;
 }
 
-/** Deploys the 503 maintenance Worker to each resolved target.
+/** Replaces each resolved target's production deployment with an empty one:
+ *  no files and no Worker, so every path serves Pages' own 404.  Static
+ *  requests are free and unmetered, whereas a Worker here would turn every hit
+ *  into a Functions invocation against the daily request quota (verified live
+ *  2026-11-17: accepted, 404 everywhere, rollback restores the site).
  *  Returns the targets that were successfully blocked. */
-export async function blockPages(
-  env: Env,
-  cfg: AppConfig,
-  targets: PageTarget[],
-): Promise<BlockedPage[]> {
+export async function blockPages(env: Env, targets: PageTarget[]): Promise<BlockedPage[]> {
   if (targets.length === 0) return [];
 
   const accountId = encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID);
   const token = env.CLOUDFLARE_API_TOKEN;
-  const compatDate = cfg.blocking.pagesCompatibilityDate ?? DEFAULT_COMPAT_DATE;
-  const bundle = await buildKillBundle(compatDate);
   const blocked: BlockedPage[] = [];
 
   const results = await Promise.allSettled(
@@ -128,7 +106,6 @@ export async function blockPages(
 
       const form = new FormData();
       form.append('manifest', '{}');
-      form.append('_worker.bundle', bundle, '_worker.bundle');
       form.append('branch', productionBranch);
       form.append('commit_message', 'Kill switch activated');
 

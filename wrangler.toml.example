@@ -17,6 +17,20 @@ binding = "KILL_SWITCH_STATE"
 id = "REPLACE_ME_WITH_YOUR_KV_NAMESPACE_ID"
 
 # ---------------------------------------------------------------------------
+# Rate limiting for POST /restore — RECOMMENDED when enableRecoveryWebhook is true
+# Binding name must stay RESTORE_RATE_LIMITER. namespace_id is any positive integer
+# string unique in your account. Without it, an in-memory per-isolate limiter is
+# used. Needs wrangler 4.36+. Limits are per Cloudflare location (approximate).
+# ---------------------------------------------------------------------------
+[[ratelimits]]
+name = "RESTORE_RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+# ---------------------------------------------------------------------------
 # Vars (not secret — safe to commit)
 # ---------------------------------------------------------------------------
 [vars]
@@ -66,6 +80,27 @@ WORKER_SELF_NAME = "cloudflare-killswitch"
 # [vars] additions for email (add under the existing [vars] section above):
 # EMAIL_FROM = "killswitch@yourdomain.com"   # must be a verified sender in Email Routing
 # EMAIL_TO   = "you@example.com"             # must match destination_address above
+
+# ---------------------------------------------------------------------------
+# Webhook alerts — OPTIONAL, works without a domain or Email Routing
+# Set the URL as a SECRET (it is a credential — anyone with it can post to your
+# channel), never in [vars]:
+#   pnpm exec wrangler secret put ALERT_WEBHOOK_URL
+# The payload format is chosen from the host, so no other config is needed:
+#   ntfy       https://ntfy.sh/<your-long-random-topic>   (plain text + Title header)
+#   Discord    https://discord.com/api/webhooks/<id>/<token>   (JSON, 2000-char cap)
+#   Slack      https://hooks.slack.com/services/T000/B000/XXXX   (JSON)
+# Any other https URL receives a plain-text POST like ntfy. Must be https.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Observability — persists Worker logs (including console.error from failed
+# cron ticks) so they can be read in the dashboard after the fact.
+# Workers Logs is available on the Free plan: 200,000 logs/day, 3 days retention
+# (Paid: 7 days). https://developers.cloudflare.com/workers/observability/logs/workers-logs/
+# ---------------------------------------------------------------------------
+[observability]
+enabled = true
 
 # ---------------------------------------------------------------------------
 # R2 bindings — OPTIONAL, only needed if purgeConfig.r2 is non-empty in config.ts

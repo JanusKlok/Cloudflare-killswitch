@@ -22,7 +22,11 @@ export interface WranglerInfo {
   r2Bindings: string[];
   d1Bindings: string[];
   hasSendEmail: boolean;
+  /** True when a [[ratelimits]] block binds RESTORE_RATE_LIMITER. */
+  hasRestoreRateLimiter: boolean;
   sendEmailDestination?: string;
+  /** True when an active [observability] block sets enabled = true. */
+  observabilityEnabled: boolean;
 }
 
 /** Minimal line-based TOML reader — handles exactly the shapes used in
@@ -36,6 +40,8 @@ export function parseWranglerToml(text: string): WranglerInfo {
     r2Bindings: [],
     d1Bindings: [],
     hasSendEmail: false,
+    hasRestoreRateLimiter: false,
+    observabilityEnabled: false,
   };
   let section = '';
 
@@ -50,6 +56,11 @@ export function parseWranglerToml(text: string): WranglerInfo {
       continue;
     }
 
+    if (section === 'observability' && /^enabled\s*=\s*true\b/.test(line)) {
+      info.observabilityEnabled = true;
+      continue;
+    }
+
     const kv = line.match(/^([A-Za-z0-9_]+)\s*=\s*"([^"]*)"/);
     if (!kv) continue;
     const key = kv[1];
@@ -61,6 +72,8 @@ export function parseWranglerToml(text: string): WranglerInfo {
     else if (section === 'kv_namespaces' && key === 'id') info.kvNamespaceIds.push(value);
     else if (section === 'r2_buckets' && key === 'binding') info.r2Bindings.push(value);
     else if (section === 'd1_databases' && key === 'binding') info.d1Bindings.push(value);
+    else if (section === 'ratelimits' && key === 'name' && value === 'RESTORE_RATE_LIMITER')
+      info.hasRestoreRateLimiter = true;
     else if (section === 'send_email' && key === 'destination_address')
       info.sendEmailDestination = value;
   }
@@ -89,6 +102,9 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
 
   const workersOff = Array.isArray(cfg.blocking.workers) && cfg.blocking.workers.length === 0;
   const pagesOff = Array.isArray(cfg.blocking.pages) && cfg.blocking.pages.length === 0;
+  const r2Off =
+    cfg.blocking.r2 === undefined ||
+    (Array.isArray(cfg.blocking.r2) && cfg.blocking.r2.length === 0);
 
   // --- required identifiers -------------------------------------------------
   if (isPlaceholder(w.vars['CLOUDFLARE_ACCOUNT_ID'])) {
@@ -172,7 +188,7 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
       "Fix: use scope 'zone' with a real CLOUDFLARE_ZONE_ID — or 'none' if the account has no domain.",
     );
   }
-  if (cfg.scope === 'none' && workersOff && pagesOff) {
+  if (cfg.scope === 'none' && workersOff && pagesOff && r2Off) {
     add(
       'error',
       "scope 'none' with blocking.workers and blocking.pages both empty — the kill switch would take no action on a breach",
@@ -211,6 +227,39 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
       'EMAIL_FROM / EMAIL_TO are set but the [[send_email]] block is commented out',
       'Alert emails are silently skipped without the send_email binding.',
       'Fix: uncomment [[send_email]] in wrangler.toml, or remove the EMAIL_* vars if email is not wanted.',
+    );
+  }
+
+  // ALERT_WEBHOOK_URL is a secret, so the validator cannot see it; this only
+  // fires when email is not set up either, and is a reminder, not a verdict.
+  const emailConfigured =
+    w.hasSendEmail &&
+    !isPlaceholder(w.sendEmailDestination) &&
+    !isPlaceholder(w.vars['EMAIL_FROM']) &&
+    !isPlaceholder(w.vars['EMAIL_TO']);
+  if (!emailConfigured) {
+    add(
+      'warning',
+      'No email alerts configured — set ALERT_WEBHOOK_URL or failures and kills will only appear in logs',
+      'Fix: pnpm exec wrangler secret put ALERT_WEBHOOK_URL (an ntfy.sh, Discord or Slack webhook URL; no domain needed).',
+      'If you have already set that secret, ignore this warning — the validator cannot see secrets.',
+    );
+  }
+  if (!w.observabilityEnabled) {
+    add(
+      'note',
+      '[observability] is not enabled in wrangler.toml — Worker logs are not persisted',
+      'Without it, console.error output from failed ticks is gone once you stop running `wrangler tail`.',
+      'Fix: add [observability] with enabled = true (see wrangler.toml.example).',
+    );
+  }
+
+  if (!cfg.limits.combined) {
+    add(
+      'note',
+      'limits.combined is not set — workers and pages requests are checked separately',
+      'Pages Functions requests count toward the same 100,000/day Workers Free quota, so 60k + 60k trips neither limit yet exceeds it.',
+      'Fix: add combined: { requests: { blockAt: 100_000 } } to limits in src/config.ts (see src/config.example.ts).',
     );
   }
 
@@ -289,6 +338,8 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
   if (cfg.scope === 'account') perms.push('Account -> Account WAF: Edit');
   if (!workersOff) perms.push('Account -> Workers Scripts: Edit');
   if (!pagesOff) perms.push('Account -> Cloudflare Pages: Edit');
+  // The API token permission-group name is "Workers R2 Storage Write"; the dashboard calls it Edit.
+  if (!r2Off) perms.push('Account -> Workers R2 Storage: Edit');
   add(
     'note',
     'CLOUDFLARE_API_TOKEN needs these permissions for this configuration:',
@@ -298,8 +349,8 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
   if (cfg.autoResetOnBillingCycle && isValidBillingCycleDay(cfg.billingCycleDay)) {
     add(
       'note',
-      `Auto-reset is on — traffic is restored on the first tick on or after day ${cfg.billingCycleDay} of each UTC month`,
-      'Verify that matches your Cloudflare billing renewal date, or the block lifts before the quota actually resets.',
+      `Auto-reset is on — a kill from daily quotas lifts after 00:00 UTC; one involving a per-cycle limit lifts on or after day ${cfg.billingCycleDay} of each UTC month`,
+      'Either way only once nothing is over a limit. Verify the day matches your Cloudflare billing renewal date, or a per-cycle block lifts before the quota actually resets.',
     );
   }
   if (
@@ -312,6 +363,14 @@ export function validate(cfg: AppConfig, w: WranglerInfo): Issue[] {
       'The recovery webhook is enabled but RECOVERY_HOSTNAME is not set',
       'The WAF block rule then exempts POST /restore on every host in the zone, not just the kill switch — including your own origin app.',
       'Fix: set RECOVERY_HOSTNAME in [vars] to the hostname /restore is served on (e.g. cloudflare-killswitch.<subdomain>.workers.dev).',
+    );
+  }
+  if (cfg.enableRecoveryWebhook && !w.hasRestoreRateLimiter) {
+    add(
+      'warning',
+      'The recovery webhook is enabled but wrangler.toml has no RESTORE_RATE_LIMITER binding',
+      'POST /restore then falls back to a per-isolate in-memory rate limiter, which is not shared across isolates.',
+      'Fix: add the [[ratelimits]] block from wrangler.toml.example (name = "RESTORE_RATE_LIMITER").',
     );
   }
   if (cfg.enableRecoveryWebhook) {

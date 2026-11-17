@@ -23,3 +23,9 @@ describe('shipped config.example.ts defaults', () => {
     expect(thresholds.every((t) => t.purgeAt === undefined)).toBe(true);
   });
 });
+
+describe('combined Workers + Pages limit', () => {
+  it('ships a combined requests limit at the shared 100,000/day quota', () => {
+    expect(CONFIG.limits.combined?.requests.blockAt).toBe(100_000);
+  });
+});

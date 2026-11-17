@@ -1,10 +1,12 @@
 import type { AppConfig, Env } from './types.js';
 import { readState, writeActive } from './state.js';
 import { restoreFromState } from './restore.js';
+import { sendAlerts } from './alerts.js';
 
-const RATE_LIMIT_KEY = 'restore-attempts';
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_ATTEMPTS = 10;
+// Bounds fallback memory when an attacker rotates IPs; oldest entries go first.
+const FALLBACK_MAX_KEYS = 5_000;
 
 function jsonResponse(
   body: unknown,
@@ -28,49 +30,62 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
-function rateLimitKey(request: Request): string {
-  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-  return `${RATE_LIMIT_KEY}:${ip}`;
-}
+const fallbackHits = new Map<string, number[]>();
+let warnedMissingBinding = false;
 
-function parseAttempts(raw: string | null, now: number): number[] {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((n): n is number => typeof n === 'number' && now - n < RATE_WINDOW_MS);
-  } catch {
-    return []; // malformed state — start fresh
+/** Per-isolate sliding window used when the RESTORE_RATE_LIMITER binding is
+ *  absent.  Weaker than the binding (isolates do not share it) but it costs no
+ *  KV writes and keeps the 10-per-60s shape. */
+function fallbackLimited(ip: string, now: number): boolean {
+  if (!warnedMissingBinding) {
+    warnedMissingBinding = true;
+    console.warn(
+      'RESTORE_RATE_LIMITER binding is missing — using a per-isolate in-memory limiter for /restore. ' +
+        'Add the [[ratelimits]] block from wrangler.toml.example for a limit shared across isolates.',
+    );
   }
+  const recent = (fallbackHits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_MAX_ATTEMPTS) {
+    fallbackHits.set(ip, recent);
+    return true;
+  }
+  recent.push(now);
+  fallbackHits.delete(ip); // re-insert so Map order tracks recency
+  fallbackHits.set(ip, recent);
+
+  if (fallbackHits.size > FALLBACK_MAX_KEYS) {
+    for (const [key, hits] of fallbackHits) {
+      if (hits.every((t) => now - t >= RATE_WINDOW_MS)) fallbackHits.delete(key);
+    }
+    while (fallbackHits.size > FALLBACK_MAX_KEYS) {
+      const oldest = fallbackHits.keys().next().value;
+      if (oldest === undefined) break;
+      fallbackHits.delete(oldest);
+    }
+  }
+  return false;
 }
 
-/** Read-only check of the rolling per-IP window.
+/** Per-client-IP rate limit on POST /restore, checked before authentication.
  *
- *  Split from recording deliberately.  This used to write to KV on *every*
- *  request, including unauthenticated ones — and because the WAF rule exempts
- *  /restore so it stays reachable during a kill, an attacker could spend the
- *  free tier's 1,000 KV writes/day, which is a metric this very Worker monitors.
- *  Unauthenticated traffic could therefore trigger the kill it is meant to
- *  guard.  Writes now happen only after a failed authentication (below), so a
- *  single IP can cost at most RATE_MAX_ATTEMPTS writes per window.
+ *  Uses the Workers Rate Limiting binding, which keeps its counters outside KV.
+ *  The previous KV-backed limiter wrote on every failed auth, and because the
+ *  WAF rule exempts /restore so it stays reachable during a kill, an attacker
+ *  rotating IPs could burn the free tier's 1,000 KV writes/day — a metric this
+ *  Worker monitors — and so trigger a kill with unauthenticated traffic.
  *
- *  KV reads are eventually consistent (~60 s), so this is a soft cap. The
- *  32-byte RECOVERY_SECRET remains the primary brute-force defense. Keyed per
- *  client IP: a global budget would let an attacker lock the real operator out
- *  of recovery during an incident. */
+ *  Every request is counted, not just failed auths: the binding is free of KV
+ *  writes, and counting all requests also caps authenticated retries.  Counts
+ *  are per Cloudflare location and eventually consistent, so this is a soft
+ *  cap; the 32-byte RECOVERY_SECRET remains the primary brute-force defense.
+ *  Keyed per IP: a global budget would let an attacker lock the operator out. */
 async function isRateLimited(env: Env, request: Request): Promise<boolean> {
-  const raw = await env.KILL_SWITCH_STATE.get(rateLimitKey(request));
-  return parseAttempts(raw, Date.now()).length >= RATE_MAX_ATTEMPTS;
-}
-
-/** Records one failed authentication against the client's rolling window. */
-async function recordFailedAttempt(env: Env, request: Request): Promise<void> {
-  const key = rateLimitKey(request);
-  const now = Date.now();
-  const attempts = parseAttempts(await env.KILL_SWITCH_STATE.get(key), now);
-  attempts.push(now);
-  // TTL keeps per-IP keys from accumulating in KV (60 is the KV minimum).
-  await env.KILL_SWITCH_STATE.put(key, JSON.stringify(attempts), { expirationTtl: 120 });
+  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+  if (env.RESTORE_RATE_LIMITER) {
+    const { success } = await env.RESTORE_RATE_LIMITER.limit({ key: ip });
+    return !success;
+  }
+  return fallbackLimited(ip, Date.now());
 }
 
 export async function handleFetch(request: Request, env: Env, cfg: AppConfig): Promise<Response> {
@@ -93,7 +108,6 @@ export async function handleFetch(request: Request, env: Env, cfg: AppConfig): P
 
   const auth = request.headers.get('Authorization') ?? '';
   if (!timingSafeEqual(auth, `Bearer ${env.RECOVERY_SECRET}`)) {
-    await recordFailedAttempt(env, request);
     return jsonResponse({ error: 'Unauthorized' }, 403);
   }
 
@@ -101,11 +115,17 @@ export async function handleFetch(request: Request, env: Env, cfg: AppConfig): P
   const previousReason = state.reason;
 
   if (state.status === 'killed') {
-    const { fullyRestored, errors } = await restoreFromState(env, cfg, state);
+    const { fullyRestored, errors, notes } = await restoreFromState(env, cfg, state);
     if (!fullyRestored) {
       console.error('partial restore failure:', errors.join('; '));
-      return jsonResponse({ restored: false, previousReason, errors }, 502);
+      return jsonResponse({ restored: false, previousReason, errors, notes }, 502);
     }
+    await sendAlerts(
+      env,
+      '[Kill Switch] Restored via /restore',
+      ['Traffic restored by POST /restore.', ...notes].join('\n'),
+    );
+    return jsonResponse({ restored: true, previousReason, notes }, 200);
   } else {
     await writeActive(env);
   }

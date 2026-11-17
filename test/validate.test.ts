@@ -89,7 +89,7 @@ describe('validate — scope', () => {
   it("errors when scope 'none' has no blocking configured", () => {
     const cfg = cfgWith({
       scope: 'none',
-      blocking: { ...CONFIG.blocking, workers: [], pages: [] },
+      blocking: { workers: [], pages: [], r2: [] },
     });
     const issues = validate(cfg, parseWranglerToml(GOOD_TOML));
     expect(errors(issues).join(' ')).toContain('no action');
@@ -208,6 +208,21 @@ describe('validate — notes', () => {
     expect(notes).toContain('Zone -> WAF: Edit');
     expect(notes).toContain('Workers Scripts: Edit');
     expect(notes).toContain('Cloudflare Pages: Edit');
+  });
+
+  it('lists Workers R2 Storage: Edit only when blocking.r2 is set', () => {
+    const notesFor = (r2: 'all' | string[] | undefined) =>
+      validate(
+        cfgWith({ scope: 'zone', blocking: { ...CONFIG.blocking, r2 } }),
+        parseWranglerToml(GOOD_TOML),
+      )
+        .filter((i) => i.level === 'note')
+        .flatMap((i) => [i.title, ...i.detail])
+        .join('\n');
+    expect(notesFor('all')).toContain('Workers R2 Storage: Edit');
+    expect(notesFor(['b'])).toContain('Workers R2 Storage: Edit');
+    expect(notesFor([])).not.toContain('R2 Storage');
+    expect(notesFor(undefined)).not.toContain('R2 Storage');
   });
 
   // Account Analytics: Read gates every metric query, so it is the one
@@ -337,5 +352,90 @@ describe('validate — Cloudflare id shapes', () => {
       ),
     );
     expect(errors(issues).join(' ')).toContain('not a valid Cloudflare id');
+  });
+});
+
+describe('validate — restore rate limiter binding', () => {
+  const RATELIMIT_BLOCK =
+    '\n[[ratelimits]]\nname = "RESTORE_RATE_LIMITER"\nnamespace_id = "1001"\n\n  [ratelimits.simple]\n  limit = 10\n  period = 60\n';
+  const webhookCfg = cfgWith({ scope: 'none', enableRecoveryWebhook: true });
+
+  it('parses the RESTORE_RATE_LIMITER binding', () => {
+    expect(parseWranglerToml(GOOD_TOML).hasRestoreRateLimiter).toBe(false);
+    expect(parseWranglerToml(GOOD_TOML + RATELIMIT_BLOCK).hasRestoreRateLimiter).toBe(true);
+  });
+
+  it('warns when the webhook is enabled without the binding', () => {
+    const issues = validate(webhookCfg, parseWranglerToml(GOOD_TOML));
+    expect(warnings(issues).join('\n')).toContain('RESTORE_RATE_LIMITER');
+  });
+
+  it('does not warn when the binding is present, or the webhook is off', () => {
+    const withBinding = validate(webhookCfg, parseWranglerToml(GOOD_TOML + RATELIMIT_BLOCK));
+    expect(warnings(withBinding).join('\n')).not.toContain('RESTORE_RATE_LIMITER');
+    const off = validate(
+      cfgWith({ scope: 'none', enableRecoveryWebhook: false }),
+      parseWranglerToml(GOOD_TOML),
+    );
+    expect(warnings(off).join('\n')).not.toContain('RESTORE_RATE_LIMITER');
+  });
+});
+
+describe('validate — alert channels and observability', () => {
+  const EMAIL_BLOCK =
+    '\n[[send_email]]\nname = "SEND_EMAIL"\ndestination_address = "me@example.com"\n';
+  const emailToml = withKey(
+    withKey(
+      GOOD_TOML.replace('[vars]', '[vars]\nEMAIL_FROM = "x"\nEMAIL_TO = "x"'),
+      'EMAIL_FROM',
+      'a@b.co',
+    ),
+    'EMAIL_TO',
+    'me@example.com',
+  );
+
+  it('warns to set ALERT_WEBHOOK_URL when email is not configured', () => {
+    const issues = validate(CONFIG, parseWranglerToml(GOOD_TOML));
+    expect(warnings(issues).join('\n')).toContain('No email alerts configured');
+    expect(issues.flatMap((i) => i.detail).join('\n')).toContain(
+      'wrangler secret put ALERT_WEBHOOK_URL',
+    );
+  });
+
+  it('does not warn when email is fully configured', () => {
+    const issues = validate(CONFIG, parseWranglerToml(emailToml + EMAIL_BLOCK));
+    expect(warnings(issues).join('\n')).not.toContain('No email alerts configured');
+  });
+
+  it('notes a missing [observability] block and accepts an enabled one', () => {
+    const notes = (t: string) =>
+      validate(CONFIG, parseWranglerToml(t))
+        .filter((i) => i.level === 'note')
+        .map((i) => i.title)
+        .join('\n');
+    expect(notes(GOOD_TOML)).toContain('[observability]');
+    expect(notes(GOOD_TOML + '\n[observability]\nenabled = true\n')).not.toContain(
+      '[observability]',
+    );
+    expect(notes(GOOD_TOML + '\n[observability]\nenabled = false\n')).toContain('[observability]');
+    expect(notes(GOOD_TOML + '\n# [observability]\n# enabled = true\n')).toContain(
+      '[observability]',
+    );
+  });
+});
+
+describe('limits.combined', () => {
+  it('notes when limits.combined is absent and stays silent when set', () => {
+    const { combined: _combined, ...limits } = CONFIG.limits;
+    const toml = parseWranglerToml(GOOD_TOML);
+    const without = validate(cfgWith({ limits }), toml);
+    expect(without.some((i) => i.level === 'note' && i.title.includes('limits.combined'))).toBe(
+      true,
+    );
+    const set = validate(
+      cfgWith({ limits: { ...limits, combined: { requests: { blockAt: 100_000 } } } }),
+      toml,
+    );
+    expect(set.some((i) => i.title.includes('limits.combined'))).toBe(false);
   });
 });

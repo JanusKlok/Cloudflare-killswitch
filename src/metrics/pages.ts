@@ -1,5 +1,4 @@
-import type { AppConfig, Breach, Env, MetricSample, ServiceModule } from '../types.js';
-import { gql } from '../graphql/client.js';
+import type { AccountData, AppConfig, Breach, MetricSample, ServiceModule } from '../types.js';
 import { utcDayStart, utcNow } from '../graphql/queries.js';
 import { evaluateSample } from './evaluate.js';
 
@@ -9,40 +8,31 @@ import { evaluateSample } from './evaluate.js';
 // Cloudflare's free-tier "100,000 requests/day" limit refers to Functions
 // invocations for accounts using Pages Functions.
 
-interface PagesData {
-  viewer: {
-    accounts: {
-      pagesFunctionsInvocationsAdaptiveGroups: { sum: { requests: number } }[];
-    }[];
-  };
+interface PagesAccount {
+  pagesFunctionsInvocationsAdaptiveGroups?: { sum: { requests: number } }[];
 }
 
 export const pagesModule: ServiceModule = {
   name: 'pages',
 
-  async fetchUsage(env: Env, _cfg: AppConfig): Promise<MetricSample[]> {
-    const data = await gql<PagesData>(
-      env,
-      `query PagesUsage($accountTag: String!, $start: String!, $end: String!) {
-        viewer {
-          accounts(filter: { accountTag: $accountTag }) {
-            pagesFunctionsInvocationsAdaptiveGroups(
-              limit: 10000
-              filter: { datetime_geq: $start, datetime_leq: $end }
-            ) {
-              sum { requests }
-            }
-          }
-        }
+  query() {
+    return {
+      keys: ['pagesFunctionsInvocationsAdaptiveGroups'],
+      selection: `pagesFunctionsInvocationsAdaptiveGroups(
+        limit: 10000
+        filter: { datetime_geq: $pagesStart, datetime_leq: $pagesEnd }
+      ) {
+        sum { requests }
       }`,
-      {
-        accountTag: env.CLOUDFLARE_ACCOUNT_ID,
-        start: utcDayStart(),
-        end: utcNow(),
+      variables: {
+        pagesStart: { type: 'String!', value: utcDayStart() },
+        pagesEnd: { type: 'String!', value: utcNow() },
       },
-    );
+    };
+  },
 
-    const rows = data.viewer.accounts[0]?.pagesFunctionsInvocationsAdaptiveGroups ?? [];
+  parse(account: AccountData): MetricSample[] {
+    const rows = (account as PagesAccount).pagesFunctionsInvocationsAdaptiveGroups ?? [];
     const total = rows.reduce((sum, r) => sum + r.sum.requests, 0);
     return [{ metric: 'requests', value: total, window: 'day' }];
   },

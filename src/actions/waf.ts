@@ -64,6 +64,10 @@ export async function deployBlockRule(
   env: Env,
   cfg: AppConfig,
   selfHostname?: string,
+  /** Reuse a rule of ours already in the ruleset instead of appending another.
+   *  For retries after a kill: an earlier deploy may have succeeded with its
+   *  response lost, and appending again would stack a second rule. */
+  options: { adoptExisting?: boolean } = {},
 ): Promise<{ ruleId: string; rulesetId: string }> {
   const base = scopeBase(env, cfg);
   const token = env.CLOUDFLARE_API_TOKEN;
@@ -72,6 +76,15 @@ export async function deployBlockRule(
   try {
     const rs = await cfFetch<Ruleset>(token, `${base}/rulesets/phases/${PHASE}/entrypoint`);
     rulesetId = rs.id;
+    const existing = options.adoptExisting
+      ? rs.rules?.find((r) => r.description === RULE_DESCRIPTION)?.id
+      : undefined;
+    if (existing) {
+      console.warn(
+        `waf: rule ${existing} already exists — adopting it instead of creating another`,
+      );
+      return { ruleId: existing, rulesetId: rs.id };
+    }
   } catch (err) {
     // PUT on a phase entrypoint REPLACES its entire rules array, so the create
     // path below may only run when the ruleset genuinely does not exist yet.
