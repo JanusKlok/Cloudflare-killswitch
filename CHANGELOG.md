@@ -12,6 +12,7 @@ All notable changes to this project are documented here.  Format follows [Keep a
 
 ### Changed
 
+- **Setup scripts install dependencies before checking the Wrangler login** (on a fresh clone `pnpm exec wrangler` did not exist yet), list `Account Analytics: Read` in the token prompt, and default the recovery webhook to off, matching `config.example.ts`.
 - **Blocked Pages projects get an empty deployment instead of a 503 Worker.** Every path now serves Pages' own 404. Static requests are free and unmetered, whereas the 503 Worker turned each visit to a blocked site into a Functions invocation counted against the 100,000/day Workers quota. `blocking.pagesCompatibilityDate` is now ignored. Deployment and rollback verified against the live API.
 - **Breaking: KV deletes and lists have their own limits (`limits.kv.deletes`, `limits.kv.lists`, 1,000/day each on Free).** They used to be added into `writes`, so 400 writes + 400 deletes + 300 lists killed although no real quota was hit. Existing configs must add both keys.
 

@@ -83,8 +83,9 @@ demonstrate concrete impact:
 - The `/restore` rate limit is a soft cap. The binding's counts are per
   Cloudflare location and eventually consistent, the in-memory fallback is per
   isolate, and an attacker rotating source IPs gets a fresh window per IP. The
-  32-byte `RECOVERY_SECRET` is the primary brute-force defense. Cloudflare's docs
-  do not state whether the Rate Limiting binding is available on the Free plan.
+  32-byte `RECOVERY_SECRET` is the primary brute-force defense. On the Free plan
+  (tested 2026-11-17) the binding began answering 429 after about 20 requests in
+  a minute, not exactly 10.
 - A bucket whose `r2.dev` state could not be read is blocked but left off at
   restore, to avoid making a private bucket public. It stays dark until the
   operator re-enables it by hand (the alert says which).
@@ -98,11 +99,11 @@ demonstrate concrete impact:
   on a custom domain or route keeps serving unless a WAF rule covers its zone
   (`scope: 'zone'` / `'account'`).
 - A remnant that can never be restored (a deleted Pages project, say) is
-  retried on every 5-minute tick, costing roughly 288 KV writes/day against the
-  free tier's 1,000. This cannot self-trigger a second kill — a killed tick never
-  starts a new one, whatever the usage reads — but it is deliberate: the alternative, capping the
-  retries, permanently strands accounts that have `enableRecoveryWebhook: false`
-  and so have no manual path back.
+  retried on every 5-minute tick. Each retry costs a few API subrequests but no
+  KV write while the remnant is unchanged, and the "Restore partly failed" alert
+  is sent only when it changes. This is deliberate: capping the retries would
+  permanently strand accounts that have `enableRecoveryWebhook: false` and so
+  have no manual path back.
 - On the Workers Free plan an invocation is capped at 50 subrequests. A quiet
   tick costs 1 (a single GraphQL request); the first kill adds a GET and a
   write per Worker, Pages project and R2 bucket, plus the WAF calls, and each

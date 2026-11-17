@@ -60,17 +60,20 @@ if (-not (Get-Command node  -ErrorAction SilentlyContinue)) { Fail "Node.js not 
 if (-not (Get-Command pnpm  -ErrorAction SilentlyContinue)) { Fail "pnpm not found -- run: npm install -g pnpm" }
 Write-Ok "Node.js and pnpm found"
 
+# ── Dependencies ───────────────────────────────────────────────────────────────
+# Before the login check: wrangler is a dev dependency, so `pnpm exec wrangler`
+# does not exist on a fresh clone until this has run.
+Write-Info "Installing dependencies..."
+pnpm install
+if ($LASTEXITCODE -ne 0) { Fail "pnpm install failed" }
+Write-Ok "Dependencies installed"
+
 $whoami = pnpm exec wrangler whoami 2>&1
 if ($LASTEXITCODE -ne 0) {
   Write-Host "`n  Wrangler is not authenticated. Opening browser login...`n" -ForegroundColor Yellow
   pnpm exec wrangler login
 }
 Write-Ok "Wrangler authenticated"
-
-# ── Dependencies ───────────────────────────────────────────────────────────────
-Write-Info "Installing dependencies..."
-pnpm install
-Write-Ok "Dependencies installed"
 
 # ── KV namespace ───────────────────────────────────────────────────────────────
 Write-Info "Creating KV namespace..."
@@ -129,6 +132,7 @@ $tokenPerms = switch ($scope) {
   'account' { 'Account -> Account WAF -> Edit' }
   'none'    { 'Workers Scripts / Cloudflare Pages -> Edit, depending on the blocking choices below' }
 }
+$tokenPerms = "Account -> Account Analytics -> Read, plus $tokenPerms (and Workers R2 Storage -> Edit if you later set blocking.r2; pnpm run validate prints the full list)"
 Write-Host ""
 Write-Ask "Cloudflare API Token  (needs $tokenPerms)"
 Write-Host "    Create at: dash.cloudflare.com/profile/api-tokens" -ForegroundColor DarkGray
@@ -139,7 +143,7 @@ if (-not $apiToken) { Fail "API Token is required" }
 Write-Section "Recovery webhook (optional)"
 Write-Host "  Lets you restore traffic via POST /restore without touching the dashboard.`n"
 
-$enableWebhook  = Ask-YesNo "Enable recovery webhook?" -Default $true
+$enableWebhook  = Ask-YesNo "Enable recovery webhook?" -Default $false
 $recoverySecret = ''
 if ($enableWebhook) {
   Write-Host ""

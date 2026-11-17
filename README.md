@@ -23,8 +23,26 @@ No external services, no runtime dependencies. Runs entirely on Cloudflare infra
 
 ---
 
+## Quick start
+
+You need Node.js 22+ and pnpm (see [Prerequisites](#prerequisites)). Then:
+
+```
+git clone https://github.com/JanusKlok/Cloudflare-killswitch.git
+cd Cloudflare-killswitch
+pnpm install
+.\setup.ps1                              # Windows (PowerShell)
+bash setup.sh                            # macOS / Linux
+pnpm exec wrangler tail --format pretty  # watch a cron tick (within 5 minutes)
+```
+
+The setup script checks your Wrangler login, creates the KV namespace, writes `wrangler.toml` and `src/config.ts`, sets secrets and offers to deploy. It does not cover everything: see [what the scripts do and don't cover](#automated-setup-recommended). A healthy tick shows status `Ok` and no log lines, see [Verifying it works](#verifying-it-works).
+
+---
+
 ## Table of contents
 
+- [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [Prerequisites](#prerequisites)
 - [Automated setup](#automated-setup-recommended)
@@ -38,6 +56,7 @@ No external services, no runtime dependencies. Runs entirely on Cloudflare infra
 - [Recovery](#recovery)
 - [Verifying it works](#verifying-it-works)
 - [API token permissions](#api-token-permissions)
+- [Upgrading from 2.0.0](#upgrading-from-200)
 - [Local development and testing](#local-development-and-testing)
 - [Extending: adding a new service](#extending-adding-a-new-service)
 - [Troubleshooting](#troubleshooting)
@@ -59,7 +78,8 @@ On each cron tick (default: every 5 minutes, configurable in wrangler.toml):
 
   4. State is 'active' and a threshold is breached:
        a. Deploy a WAF Custom Rule blocking all requests
-          (POST /restore is exempted so you can still recover)
+          (with the recovery webhook on, POST /restore is exempted so you
+          can still recover; see enableRecoveryWebhook)
        b. Look up which configured Workers scripts, Pages projects and R2
           buckets are exposed, and record them in KV BEFORE touching them
        c. Turn off workers.dev + preview URLs for the exposed Workers scripts,
@@ -121,6 +141,7 @@ All IDs are stored so `POST /restore` can undo each action precisely — no manu
 
 - `resetWindow` — `"day"` or `"cycle"`: which quota has to roll over before auto-reset is due (see [`autoResetOnBillingCycle`](#autoresetonbillingcycle)). Absent in states written by v2.0.0, which reset per billing cycle.
 - `purgedServices` — services whose purge already ran during this kill, so it never runs twice. Absent in v2.0.0 states, which never purge on a later tick.
+- `restorePending` — `true` when a restore only partly succeeded. The state stays `killed` with only the failed items, and later ticks retry the restore instead of re-blocking (see [Partial restore](#partial-restore)). v2.0.0 remnants have no flag and are recognised by a `reason` starting with `partial restore failure`.
 - `pendingWorkerBlocks`, `pendingPagesBlocks`, `pendingR2Blocks` — recorded targets whose block call has not succeeded yet; retried on every tick.
 - `blockedPagesProjects[].productionBranch` — the branch a retried kill deployment is pushed to.
 - `blockedR2Buckets` — buckets whose `r2.dev` URL was on (with `jurisdiction` for non-default ones, and `priorStateUnknown` when the state could not be read).
@@ -129,7 +150,7 @@ All IDs are stored so `POST /restore` can undo each action precisely — no manu
 
 ## Prerequisites
 
-- **A Cloudflare account** with at least one active zone (domain pointing to Cloudflare)
+- **A Cloudflare account.** A zone (a domain pointing to Cloudflare) is only needed for `scope: 'zone'` or `'account'`, where the WAF rule protects zones. With `scope: 'none'` no zone is needed
 - **Node.js 22+** and **pnpm** (`npm install -g pnpm`)
 - **Wrangler CLI** — installed automatically as a dev dependency; use `pnpm exec wrangler` or add it to your PATH
 
@@ -139,13 +160,17 @@ All IDs are stored so `POST /restore` can undo each action precisely — no manu
 
 ## Automated setup (recommended)
 
-The setup scripts handle everything interactively: creating the KV namespace, filling in `wrangler.toml`, setting secrets, and deploying. You just answer the prompts.
+The setup scripts handle the common path interactively: creating the KV namespace, filling in `wrangler.toml` and `src/config.ts`, setting secrets, and deploying. You just answer the prompts.
 
-**Before running the script**, make sure you are authenticated with Wrangler:
+**Before running the script**, clone the repo and install dependencies (the script uses the local Wrangler, which `pnpm install` provides):
 
 ```
-pnpm exec wrangler login
+git clone https://github.com/JanusKlok/Cloudflare-killswitch.git
+cd Cloudflare-killswitch
+pnpm install
 ```
+
+The script then checks whether you are logged in to Wrangler and starts `wrangler login` if not.
 
 **macOS / Linux:**
 
@@ -159,7 +184,15 @@ bash setup.sh
 .\setup.ps1
 ```
 
-The script will ask for your Account ID, Zone ID, API token, and walk you through each optional feature. At the end it offers to deploy immediately.
+The script asks for the WAF scope, Account ID, Zone ID (unless the scope is `none`), API token, recovery webhook (default: no), email addresses, which Workers scripts and Pages projects to block, and your billing cycle day. At the end it offers to deploy immediately.
+
+**What the scripts do not cover.** Set these by hand afterwards:
+
+- `blocking.r2`: see [`blocking`](#blocking) and [Block r2.dev public URLs](#block-r2dev-public-urls)
+- Webhook alerts: set the `ALERT_WEBHOOK_URL` secret, see [Webhook setup](#webhook-setup)
+- `RECOVERY_HOSTNAME`: see [Environment variables and secrets](#environment-variables-and-secrets)
+- `limits.combined`: the script leaves the default from `config.example.ts` (100,000 requests per day), see [limits](#limits)
+- Thresholds and purge: see [limits](#limits) and [Optional: destructive purge](#optional-destructive-purge)
 
 > If you chose to generate a recovery secret automatically, the script prints it at the end. **Save it somewhere safe** — you will need it to call `POST /restore`.
 
@@ -169,11 +202,12 @@ The script will ask for your Account ID, Zone ID, API token, and walk you throug
 
 If you prefer full control over each step, or want to understand exactly what the script does, follow the instructions below.
 
-**Required for any deployment:** steps 1–5 (code, dependencies, KV namespace, wrangler.toml placeholders, API token). Steps 6 and 7 have sensible defaults — read them, but you may not need to change anything.
+**Required for any deployment:** steps 1–5 (code, dependencies, KV namespace, wrangler.toml placeholders, API token), plus creating `src/config.ts` from the template (the first part of step 6). Editing its values is optional, because the defaults work. Step 7 deploys.
 
 | What | Required? |
 |------|-----------|
 | KV namespace + wrangler.toml placeholders | Yes |
+| `src/config.ts` (copy of `src/config.example.ts`) | Yes |
 | `CLOUDFLARE_API_TOKEN` secret | Yes |
 | `RECOVERY_SECRET` secret | Only if you set `enableRecoveryWebhook: true` (default `false`) |
 | Email or webhook alerts | No — silently skipped if not configured |
@@ -307,7 +341,7 @@ pnpm run deploy
 pnpm run validate
 ```
 
-After deploying, confirm the cron trigger is registered: **Workers & Pages → cloudflare-killswitch → Triggers → Cron Triggers**.
+After deploying, confirm the cron trigger is registered: **Workers & Pages → cloudflare-killswitch → Settings → Trigger Events**.
 
 The polling interval is set in `wrangler.toml` under `[triggers] crons`. The default is `*/5 * * * *` (every 5 minutes). Change it to any valid cron expression before deploying if you want a different cadence.
 
@@ -334,7 +368,7 @@ export const CONFIG: AppConfig = {
   scope: 'zone',
   billingCycleDay: 1,
   autoResetOnBillingCycle: true,
-  enableRecoveryWebhook: true,
+  enableRecoveryWebhook: false,
   limits: { workers, pages, combined, kv, r2, d1 },
   purgeConfig: { r2: [], d1: [] },
   blocking: { workers: [], pages: [], r2: [] },
@@ -431,12 +465,15 @@ enableRecoveryWebhook: boolean  // default: false
 
 When `true`:
 - The worker handles `POST /restore` requests authenticated with `RECOVERY_SECRET`
-- The WAF block rule expression exempts `POST /restore` so the endpoint remains reachable even while traffic is blocked
+- The WAF block rule expression exempts `POST /restore` so the endpoint remains reachable even while traffic is blocked. If `RECOVERY_HOSTNAME` is set, the exemption applies only to that host. If it is not set, it applies to `POST /restore` on **every host in the zone**, including your own origin app (`pnpm run validate` warns about this). Set `RECOVERY_HOSTNAME` to the hostname you call `/restore` on, and make sure it matches exactly, or the WAF blocks your restore request too. See [Environment variables and secrets](#environment-variables-and-secrets)
+- With `scope: 'none'` there is no WAF rule, so the exemption does not apply
 
 When `false`:
 - `POST /restore` returns 404
 - The WAF rule blocks **all** traffic without exception
-- The only recovery path is manually deleting the WAF rule in the Cloudflare dashboard (Security → WAF → Custom Rules)
+- Recovery is by [auto-reset](#autoresetonbillingcycle), or by hand in the dashboard: delete the WAF rule (Security → WAF → Custom Rules), re-enable each Worker's `workers.dev` URL, roll each Pages project back, turn `r2.dev` back on, and delete the `state` key in the `KILL_SWITCH_STATE` KV namespace
+
+**`workers_dev` in `wrangler.toml`:** `/restore` is served on the kill switch's own `workers.dev` URL, which needs `workers_dev = true`. When `enableRecoveryWebhook` is `false`, set `workers_dev = false`: the cron trigger runs without a public URL, and a public URL lets anyone send requests that count toward the 100,000/day Workers quota and so push the account towards a kill.
 
 ### limits
 
@@ -492,11 +529,15 @@ combined: {
 kv: {
   reads:        { blockAt: 100_000 },       // read ops / day   (free tier: 100,000)
   writes:       { blockAt: 1_000 },         // write ops / day  (free tier: 1,000)
+  deletes:      { blockAt: 1_000 },         // delete ops / day (free tier: 1,000)
+  lists:        { blockAt: 1_000 },         // list ops / day   (free tier: 1,000)
   storageBytes: { blockAt: 1_073_741_824 }, // storage in bytes (free tier: 1 GB)
-  //   reads and writes: window = UTC calendar day
-  //   storageBytes:     current size (latest gauge in the last 48 hours), not a counter
+  //   reads, writes, deletes and lists: window = UTC calendar day
+  //   storageBytes: highest reading per namespace in the last 48 hours, summed, not a counter
 }
 ```
+
+`deletes` and `lists` are required keys, metered separately from `writes`. See [Storage metrics](#storage-metrics) for how the storage figure is read.
 
 **R2**
 
@@ -506,7 +547,7 @@ r2: {
   classAOps:    { blockAt: 1_000_000 },      // Class A ops / month (free tier: 1M)
   classBOps:    { blockAt: 10_000_000 },     // Class B ops / month (free tier: 10M)
   //   classAOps / classBOps: window = current billing cycle (see billingCycleDay)
-  //   storageBytes:          current size (latest gauge in the last 48 hours), not a counter
+  //   storageBytes:          highest reading per bucket in the last 48 hours, summed, not a counter
 }
 ```
 
@@ -520,7 +561,7 @@ d1: {
   rowWrites:    { blockAt: 100_000 },        // row writes / day  (free tier: 100,000)
   storageBytes: { blockAt: 5_368_709_120 },  // storage in bytes  (free tier: 5 GB)
   //   rowReads and rowWrites: window = UTC calendar day
-  //   storageBytes:           current size (latest gauge in the last 48 hours), not a counter
+  //   storageBytes:           highest reading per database in the last 48 hours, summed, not a counter
 }
 ```
 
@@ -603,17 +644,28 @@ On a breach the kill switch turns off each bucket's public `r2.dev` URL, and on 
 
 **API token permissions required:** If `blocking.workers`, `blocking.pages` or `blocking.r2` is non-empty, your API token needs additional permissions beyond the WAF rule. See [API token permissions](#api-token-permissions).
 
+### Environment variables and secrets
+
+Variables go in `[vars]` in `wrangler.toml`; secrets are set with `pnpm exec wrangler secret put <NAME>`. The setup scripts prompt for the account and zone IDs, the API token, the recovery secret and the email addresses. `WORKER_SELF_NAME` keeps the example default, and `RECOVERY_HOSTNAME` and `ALERT_WEBHOOK_URL` are left to you.
+
+| Name | Kind | Needed when | What it does |
+|------|------|-------------|--------------|
+| `CLOUDFLARE_API_TOKEN` | secret | always | API token, see [API token permissions](#api-token-permissions) |
+| `CLOUDFLARE_ACCOUNT_ID` | var | always | Account for every metric query and blocking action |
+| `CLOUDFLARE_ZONE_ID` | var | `scope: 'zone'` | Zone that receives the WAF rule |
+| `WORKER_SELF_NAME` | var | always (matters most with `blocking.workers: 'all'`) | Must equal the `name` at the top of `wrangler.toml` (default `cloudflare-killswitch`). With `'all'`, the Worker uses it to exclude itself. A mismatch makes `pnpm run validate` report an error under `'all'` (a warning otherwise), because the kill switch would disable its own `workers.dev` URL and `/restore` would become unreachable |
+| `RECOVERY_SECRET` | secret | `enableRecoveryWebhook: true` | Bearer token for `POST /restore`. If it is unset, `/restore` answers `500` rather than accepting requests |
+| `RECOVERY_HOSTNAME` | var, optional | `enableRecoveryWebhook: true` and a WAF scope | Hostname `/restore` is served on, for example `cloudflare-killswitch.<subdomain>.workers.dev`. The WAF rule then exempts `POST /restore` only on that host. Without it, the exemption covers `POST /restore` on every host in the zone, and the validator warns |
+| `ALERT_WEBHOOK_URL` | secret, optional | webhook alerts | `https` URL for ntfy, Discord, Slack or any other service, see [Webhook setup](#webhook-setup) |
+| `EMAIL_FROM`, `EMAIL_TO` | var, optional | email alerts | Sender and recipient, together with the `[[send_email]]` block, see [Email setup](#email-setup) |
+
+`RECOVERY_HOSTNAME` is read when the WAF rule is deployed, so it only affects kills that happen after you set it and redeploy.
+
 ---
 
 ## How this compares with Cloudflare Spend Management
 
-Cloudflare's [Spend Management](https://blog.cloudflare.com/spend-management/) (Beta, announced November 2026) lets pay-as-you-go customers set spend caps, starting with Workers and Durable Objects. It is a different tool from this one:
-
-- It is a spend cap for pay-as-you-go usage. This kill switch watches free-tier quotas and request counts.
-- The announcement covers Workers and Durable Objects only. It does not describe caps for Pages, R2, KV or D1 free-tier quotas.
-- When a cap is enforced, the product is paused, and the post states that in Workers "Cron Triggers and Queue consumer invocations are paused". A native cap that pauses Workers would therefore pause the Cron Trigger this kill switch runs on, which would stop its own monitoring.
-
-The two can be used together, but check what your cap pauses first. Details may change while Spend Management is in Beta.
+Cloudflare's [Spend Management](https://blog.cloudflare.com/spend-management/) lets pay-as-you-go customers set spend caps. This kill switch instead watches free-tier quotas and request counts and blocks traffic. Check Cloudflare's current docs for which products a cap covers and what it pauses: a cap that pauses Workers would also pause the Cron Trigger this kill switch runs on.
 
 ---
 
@@ -628,15 +680,15 @@ The two can be used together, but check what your cap pauses first. Details may 
 | KV | writes | Daily | 1,000 / day |
 | KV | deletes | Daily | 1,000 / day |
 | KV | lists | Daily | 1,000 / day |
-| KV | storage | Current size (latest gauge, 48 h lookback) | 1 GB |
-| R2 | storage | Current size (latest gauge, 48 h lookback) | 10 GB |
+| KV | storage | Highest reading per namespace in the last 48 h, summed | 1 GB |
+| R2 | storage | Highest reading per bucket in the last 48 h, summed | 10 GB |
 | R2 | Class A operations | Monthly | 1,000,000 |
 | R2 | Class B operations | Monthly | 10,000,000 |
 | D1 | row reads | Daily | 5,000,000 / day |
 | D1 | row writes | Daily | 100,000 / day |
-| D1 | storage | Current size (latest gauge, 48 h lookback) | 5 GB |
+| D1 | storage | Highest reading per database in the last 48 h, summed | 5 GB |
 
-**Window alignment:** Daily metrics query from UTC midnight of the current day to now. Per-cycle metrics (R2 Class A/B operations) query from UTC midnight of the day the current billing period opened (see [`billingCycleDay`](#billingcycleday)) to now — with `billingCycleDay: 1` that is the 1st of the calendar month. **Storage metrics are different:** storage is a gauge, not a running total, so the worker reads the latest stored-bytes sample from the last 48 hours and compares that current size to the ceiling. A peak freed weeks ago does not trigger a block. These samples are still tagged with the `cycle` window in reports, so a storage breach resets with the billing period, not at 00:00 UTC.
+**Window alignment:** Daily metrics query from UTC midnight of the current day to now. Per-cycle metrics (R2 Class A/B operations) query from UTC midnight of the day the current billing period opened (see [`billingCycleDay`](#billingcycleday)) to now — with `billingCycleDay: 1` that is the 1st of the calendar month. Storage metrics are different, see [Storage metrics](#storage-metrics).
 
 **One request per tick:** Each tick reads all usage metrics with a single GraphQL request (it used to take 8). If Cloudflare reports an error for one dataset, only that service is marked failed; the others are still evaluated.
 
@@ -645,6 +697,10 @@ The two can be used together, but check what your cap pauses first. Details may 
 **Analytics lag:** Cloudflare's GraphQL Analytics API has a pipeline delay of roughly 1–2 minutes. Usage values seen by the worker may be slightly behind real-time.
 
 **D1 storage aggregation:** The D1 storage metric is the total across all D1 databases on the account, because Cloudflare bills it as a single account-level quota.
+
+### Storage metrics
+
+Storage is a gauge, not a running total. For each KV namespace, R2 bucket and D1 database the worker takes the **highest reading in the last 48 hours**, sums those maxima across all of them, and compares the total to the ceiling. A peak freed weeks ago does not trigger a block, but storage you freed recently can still count for up to 48 hours. Storage samples are tagged with the `cycle` window in reports, so a storage breach resets with the billing period, not at 00:00 UTC.
 
 ---
 
@@ -801,9 +857,7 @@ blocking: {
 },
 ```
 
-On a breach the kill switch turns off each bucket's public `r2.dev` URL, and on restore turns it back on only for buckets whose URL was on before the kill, so private buckets are never made public. A bucket whose state could not be read is still blocked but left off at restore (reported in the alert so you can re-enable it by hand). Buckets served through a connected custom domain, and S3-API access with R2 API tokens, are **not** blocked.
-
-`'all'` covers buckets in every jurisdiction.
+What gets turned off, what is restored and what is not covered is described under [`blocking.r2`](#blocking) in the configuration reference. `'all'` covers buckets in every jurisdiction.
 
 **API token requirement:** Add `Account → Workers R2 Storage → Edit` to your token.
 
@@ -842,6 +896,8 @@ On the Workers Free plan each invocation is capped at 50 subrequests, and every 
 | Each tick while killed | plus list calls for the blocking set to `'all'`: one Workers scripts list, one Pages projects list, and up to 5 R2 bucket lists (one per jurisdiction) |
 | The first kill | plus, per Worker, one GET and (if exposed) one POST; per Pages project, one GET and one deploy; per R2 bucket, one GET and (if public) one PUT; plus the WAF calls |
 | Restore | one call per recorded item |
+
+With `'all'` blocking, Workers that are not exposed on `workers.dev` and R2 buckets whose `r2.dev` URL is off are never recorded, so they are re-read (one GET each) on every killed tick. That cost grows with the number of such targets on the account.
 
 A purge adds its own R2/D1 calls on top. Roughly 20 targets in total (Workers + Pages projects + R2 buckets) is a practical ceiling on the Free plan. Beyond that some blocks may fail (failures are logged, and retried on the next tick), so list the targets that matter explicitly, or run the kill switch on a paid plan (10,000 subrequests).
 
@@ -993,30 +1049,7 @@ There are two ways to lift a kill-switch block:
 
 ### Auto-reset (when the quota resets)
 
-With `autoResetOnBillingCycle: true` (the default), the worker automatically
-recovers once the quota that caused the kill has reset, provided:
-
-- The current KV state is `killed`
-- The reset is due: for a kill caused only by daily quotas, the kill time predates
-  today's 00:00 UTC; for a kill involving any per-cycle limit (and for states
-  written by v2.0.0), it predates the start of the billing period
-  (`billingCycleDay` must then be a valid integer 1–31)
-- Nothing is still over a limit — usage is read on every tick, even while killed,
-  and a limit that is still exceeded keeps the kill switch killed instead of
-  restoring and re-killing
-
-On the first cron tick that meets these conditions:
-1. Pages projects are rolled back to their pre-kill deployments (if any were blocked)
-2. Workers scripts get their recorded `workers.dev` and preview-URL values written back (if any were disabled)
-3. R2 buckets whose `r2.dev` URL was on get it turned back on (if any were blocked)
-4. The WAF rule is deleted via the Cloudflare API
-5. KV state is set to `active`
-6. Normal usage monitoring resumes
-
-See [`autoResetOnBillingCycle`](#autoresetonbillingcycle) for which limits reset
-when. The original kill time is preserved across failed restore attempts, so a
-partial failure retries on the next tick instead of suppressing auto-reset for the
-rest of the period.
+With `autoResetOnBillingCycle: true` (the default), the worker restores itself on the first cron tick after the quota that caused the kill has reset, as long as nothing is still over a limit. It undoes the same things as `POST /restore` (see [How it works](#how-it-works)) and then resumes normal monitoring. [`autoResetOnBillingCycle`](#autoresetonbillingcycle) explains which limits reset when, and what happens if a limit is still exceeded.
 
 ### Manual restore via webhook
 
@@ -1027,17 +1060,19 @@ POST https://cloudflare-killswitch.<your-subdomain>.workers.dev/restore
 Authorization: Bearer YOUR_RECOVERY_SECRET
 ```
 
-Using curl:
+With curl (Linux / macOS):
 
 ```
-# Linux / macOS:
-curl -s -X POST https://cloudflare-killswitch.your-subdomain.workers.dev/restore \
-     -H "Authorization: Bearer YOUR_RECOVERY_SECRET" | jq
-
-# Windows PowerShell:
-curl -s -X POST https://cloudflare-killswitch.your-subdomain.workers.dev/restore `
-     -H "Authorization: Bearer YOUR_RECOVERY_SECRET"
+curl -s -X POST https://cloudflare-killswitch.your-subdomain.workers.dev/restore -H "Authorization: Bearer YOUR_RECOVERY_SECRET" | jq
 ```
+
+With PowerShell (Windows PowerShell 5.1 and PowerShell 7). In 5.1 `curl` is an alias for `Invoke-WebRequest` and does not accept these flags, so use `Invoke-RestMethod`:
+
+```
+Invoke-RestMethod -Method Post -Uri https://cloudflare-killswitch.your-subdomain.workers.dev/restore -Headers @{ Authorization = "Bearer YOUR_RECOVERY_SECRET" }
+```
+
+`Invoke-RestMethod` throws on a non-2xx status (403, 502 and so on) instead of printing the JSON body. The status code in the error still tells you which case below you hit.
 
 **Success (200):**
 
@@ -1059,13 +1094,25 @@ curl -s -X POST https://cloudflare-killswitch.your-subdomain.workers.dev/restore
 
 Both the `200` and the `502` can carry a `notes` array for things that are not failures, such as R2 buckets deliberately left off because their state before the kill was unknown.
 
-Only the failed items remain recorded in the killed state — call `POST /restore` again to retry just those.
+**Recovery secret not set (500):**
+
+```json
+{ "error": "Recovery secret not configured" }
+```
+
+This is returned when `enableRecoveryWebhook` is `true` but the `RECOVERY_SECRET` secret was never set. Run `pnpm exec wrangler secret put RECOVERY_SECRET`. The `500` is checked before the rate limit and the token.
+
+**Rate limited (429):** `{ "error": "Too Many Requests" }` with a `Retry-After: 60` header.
+
+#### Partial restore
+
+Only the failed items remain recorded in the killed state, marked `restorePending`. You can call `POST /restore` again to retry just those, but you do not have to: every 5-minute cron tick also retries a partial restore automatically, even with `autoResetOnBillingCycle: false`, unless a limit is breached at that moment (a live breach re-arms the kill and blocks everything again).
 
 The call is idempotent — if the worker is already `active`, it returns `200` with `restored: true` anyway. Requests are rate-limited to 10 per 60 seconds per client IP (`429` with a `Retry-After` header beyond that); every request counts, not just failed ones.
 
-The limit uses the Workers Rate Limiting binding `RESTORE_RATE_LIMITER`, declared in the `[[ratelimits]]` block of `wrangler.toml.example` (needs wrangler 4.36+; counts are per Cloudflare location, so it is a soft cap). Without the binding an in-memory per-isolate limiter is used instead, and `pnpm run validate` warns. Rate limiting never writes to KV, so rotating IPs cannot burn the account's KV write quota. Cloudflare's docs do not state whether the Rate Limiting binding is available on the Free plan — check that `wrangler deploy` accepts the block on your account.
+The limit uses the Workers Rate Limiting binding `RESTORE_RATE_LIMITER`, declared in the `[[ratelimits]]` block of `wrangler.toml.example` (needs wrangler 4.36+; counts are per Cloudflare location, so it is a soft cap). Without the binding an in-memory per-isolate limiter is used instead, and `pnpm run validate` warns. Rate limiting never writes to KV, so rotating IPs cannot burn the account's KV write quota. The binding works on the Workers Free plan (verified 2026-11-17); in that test, being eventually consistent, it started answering `429` after about 20 requests in a minute rather than exactly 10.
 
-The `POST /restore` endpoint is **exempt from the WAF block rule** when `enableRecoveryWebhook: true`, so it remains reachable even while all other traffic is blocked.
+With `enableRecoveryWebhook: true` and a WAF scope (`'zone'` or `'account'`), the WAF block rule exempts `POST /restore`, so it remains reachable even while all other traffic is blocked. The exemption is limited to the host in `RECOVERY_HOSTNAME` when that is set, and otherwise covers `POST /restore` on every host in the zone. See [Environment variables and secrets](#environment-variables-and-secrets).
 
 **Finding your worker URL:** After `wrangler deploy`, the URL is printed in the output. It follows the pattern `https://cloudflare-killswitch.<your-subdomain>.workers.dev`. You can also find it in the dashboard under Workers & Pages → cloudflare-killswitch → Settings → Domains & Routes.
 
@@ -1088,7 +1135,7 @@ A deployed kill switch that cannot read your usage looks exactly like one that h
 pnpm run validate
 ```
 
-This cross-checks `src/config.ts` against `wrangler.toml` before anything reaches Cloudflare. It ends in `Config check passed.` and prints the exact API-token permissions your configuration needs. It cannot inspect the token itself, so treat that list as a to-do rather than a result.
+This cross-checks `src/config.ts` against `wrangler.toml` before anything reaches Cloudflare. It ends in `Config check passed.` (or `Config check passed with N warning(s).` when there are warnings; errors end in `Config check failed` and a non-zero exit) and prints the exact API-token permissions your configuration needs. It cannot inspect the token itself, so treat that list as a to-do rather than a result.
 
 ### 2. The Worker and its cron trigger are actually deployed
 
@@ -1096,7 +1143,7 @@ This cross-checks `src/config.ts` against `wrangler.toml` before anything reache
 pnpm exec wrangler deployments list
 ```
 
-There is no `wrangler` command that lists cron triggers, so confirm the schedule one of two ways: the `wrangler deploy` output ends with a `schedule:` line for every registered trigger, or check dashboard → Workers & Pages → your Worker → Settings → Trigger Events. A Worker with no cron trigger never evaluates anything, and nothing about it looks broken.
+There is no `wrangler` command that lists cron triggers, so confirm the schedule one of two ways: the `wrangler deploy` output ends with a `schedule:` line for every registered trigger, or check **Workers & Pages → your Worker → Settings → Trigger Events** in the dashboard. A Worker with no cron trigger never evaluates anything, and nothing about it looks broken.
 
 ### 3. A cron tick runs cleanly — the check that matters most
 
@@ -1140,25 +1187,7 @@ pnpm exec wrangler kv key get state --binding KILL_SWITCH_STATE --remote
 
 The `--binding` form reads the namespace id out of your `wrangler.toml`, so there is nothing to paste.
 
-**A `404: Not Found` here is normal on a healthy install.** The `state` key is only written when the Worker kills or restores; until then there is nothing to read and the Worker treats the absent key as `active`. After a kill you get the full record instead:
-
-```json
-{
-  "status": "killed",
-  "timestamp": "2026-09-08T09:05:00.000Z",
-  "killedAt": "2026-09-08T09:05:00.000Z",
-  "reason": "1 block breach(es)",
-  "resetWindow": "day",
-  "purgedServices": [],
-  "wafRuleId": "...",
-  "wafRulesetId": "...",
-  "disabledWorkerScripts": [{ "script": "my-api", "enabled": true, "previewsEnabled": false }],
-  "blockedPagesProjects": [
-    { "project": "my-site", "previousDeploymentId": "...", "productionBranch": "main" }
-  ],
-  "blockedR2Buckets": [{ "bucket": "my-public-assets" }]
-}
-```
+**A `404: Not Found` here is normal on a healthy install.** The `state` key is only written when the Worker kills or restores; until then there is nothing to read and the Worker treats the absent key as `active`. After a kill you get the full record instead, in the format shown under [How it works](#how-it-works).
 
 `reason` is deliberately just a count — the per-metric breakdown (`workers.requests (per day): 104,213 observed, limit 100,000 [BLOCK]`) goes to the alert and the logs, so enable [email or webhook alerts](#optional-alerts-email-and-webhook) if you want to know *which* limit went.
 
@@ -1181,7 +1210,13 @@ The checks above confirm the monitoring path. Only a real breach confirms the *b
 4. **Restore**:
 
    ```
-   curl -X POST https://your-worker.your-subdomain.workers.dev/restore      -H "Authorization: Bearer YOUR_RECOVERY_SECRET"
+   curl -X POST https://your-worker.your-subdomain.workers.dev/restore -H "Authorization: Bearer YOUR_RECOVERY_SECRET"
+   ```
+
+   In PowerShell:
+
+   ```
+   Invoke-RestMethod -Method Post -Uri https://your-worker.your-subdomain.workers.dev/restore -Headers @{ Authorization = "Bearer YOUR_RECOVERY_SECRET" }
    ```
 
    A `200` with `{"restored":true,...}` means everything in the undo list was reversed. A `502` lists what could not be reversed — fix those by hand before trusting the install.
@@ -1242,6 +1277,28 @@ Scope the token to specific zones or accounts where possible to follow the princ
 
 ---
 
+## Upgrading from 2.0.0
+
+`src/config.ts` and `wrangler.toml` are untracked, so `git pull` never changes them. Compare them against `src/config.example.ts` and `wrangler.toml.example` and apply the points below, then run `pnpm run validate` and `pnpm run deploy`.
+
+**Breaking**
+
+- `limits.kv.deletes` and `limits.kv.lists` are now required (`{ blockAt: 1_000 }` each on the Free plan). They used to be counted inside `writes`. Add both keys to your `src/config.ts`.
+- `blocking.pagesCompatibilityDate` is ignored. Blocked Pages projects now get an empty production deployment that returns `404` on every path, instead of a 503 Worker.
+
+**New and optional**
+
+- `limits.combined.requests`: checks Workers and Pages Functions together against the shared 100,000/day quota. See [limits](#limits).
+- `blocking.r2`: turns off `r2.dev` URLs on a kill. See [`blocking`](#blocking). It needs the `Workers R2 Storage: Edit` token permission.
+- `ALERT_WEBHOOK_URL` secret: webhook alerts. See [Webhook setup](#webhook-setup).
+- `[[ratelimits]]` block in `wrangler.toml` (binding `RESTORE_RATE_LIMITER`): rate limit for `/restore` that does not write to KV. Copy it from `wrangler.toml.example`.
+- `[observability]` block in `wrangler.toml`: keeps Worker logs. Copy it from `wrangler.toml.example`.
+- `RECOVERY_HOSTNAME` var: limits the WAF `/restore` exemption to one host. See [Environment variables and secrets](#environment-variables-and-secrets).
+
+Kill states written by 2.0.0 still restore. They reset per billing cycle, never purge on a later tick, and a partial restore from 2.0.0 is recognised and finished by later ticks.
+
+---
+
 ## Local development and testing
 
 ### Running tests
@@ -1286,10 +1343,22 @@ Trigger the cron handler manually (use your configured cron expression, URL-enco
 curl "http://localhost:8787/__scheduled?cron=*%2F5+*+*+*+*"
 ```
 
-Test the restore endpoint:
+In PowerShell:
+
+```
+Invoke-RestMethod -Uri "http://localhost:8787/__scheduled?cron=*%2F5+*+*+*+*"
+```
+
+Test the restore endpoint (this needs `enableRecoveryWebhook: true` in your `src/config.ts`, otherwise it returns 404):
 
 ```
 curl -X POST http://localhost:8787/restore -H "Authorization: Bearer any-local-secret"
+```
+
+In PowerShell:
+
+```
+Invoke-RestMethod -Method Post -Uri http://localhost:8787/restore -Headers @{ Authorization = "Bearer any-local-secret" }
 ```
 
 The `wrangler dev` server uses the KV namespace from `wrangler.toml` with a local persistent store under `.wrangler/state/`. Restart `wrangler dev` to clear it, or manually delete the `.wrangler/` directory.
@@ -1311,7 +1380,7 @@ export interface MyServiceLimits {
 myservice: MyServiceLimits;
 ```
 
-**`src/config.ts`** — add defaults:
+**`src/config.example.ts`** — add defaults (`src/config.ts` is your untracked copy; add the same keys there to try it locally):
 
 ```ts
 limits: {
@@ -1396,7 +1465,11 @@ Verify `CLOUDFLARE_ZONE_ID` in `wrangler.toml` matches the zone you are testing.
 
 **`POST /restore` returns 404**
 
-Either `enableRecoveryWebhook` is `false` in `config.ts`, or you're sending the request to the wrong URL or with the wrong HTTP method. The endpoint only accepts `POST` on the exact path `/restore`.
+Either `enableRecoveryWebhook` is `false` in `src/config.ts`, or you're sending the request to the wrong URL or with the wrong HTTP method. The endpoint only accepts `POST` on the exact path `/restore`.
+
+**`POST /restore` returns 500**
+
+`RECOVERY_SECRET` is not set. The Worker refuses `/restore` rather than accept a missing secret. Run `pnpm exec wrangler secret put RECOVERY_SECRET`, then try again.
 
 **`POST /restore` returns 403**
 
@@ -1426,7 +1499,7 @@ Check the alert (email or webhook) for per-bucket or per-table error lines. Comm
 
 **`pnpm install` fails with a quarantine error**
 
-The `.npmrc` contains `minimum-release-age=10080` which blocks packages published less than 7 days ago. Wait until the package is 7 days old, or temporarily comment out that line in `.npmrc` for the install.
+The `.npmrc` enforces a 7-day quarantine on new package versions. See [step 2 of Manual setup](#2-install-dependencies).
 
 **`wrangler deploy` says account ID or zone ID is invalid**
 

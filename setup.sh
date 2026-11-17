@@ -30,16 +30,18 @@ command -v pnpm    >/dev/null 2>&1 || die "pnpm not found — run: npm install -
 command -v python3 >/dev/null 2>&1 || die "python3 not found — required for config file updates"
 ok "Node.js, pnpm and python3 found"
 
+# ── Dependencies ───────────────────────────────────────────────────────────────
+# Before the login check: wrangler is a dev dependency, so `pnpm exec wrangler`
+# does not exist on a fresh clone until this has run.
+info "Installing dependencies..."
+pnpm install || die "pnpm install failed"
+ok "Dependencies installed"
+
 if ! pnpm exec wrangler whoami >/dev/null 2>&1; then
   printf "\n  ${Y}Wrangler is not authenticated.${N} Opening browser login...\n\n"
   pnpm exec wrangler login
 fi
 ok "Wrangler authenticated"
-
-# ── Dependencies ───────────────────────────────────────────────────────────────
-info "Installing dependencies..."
-pnpm install
-ok "Dependencies installed"
 
 # ── KV namespace ───────────────────────────────────────────────────────────────
 info "Creating KV namespace..."
@@ -102,6 +104,7 @@ case "$SCOPE" in
   account) TOKEN_PERMS="Account → Account WAF → Edit" ;;
   none)    TOKEN_PERMS="Workers Scripts / Cloudflare Pages → Edit, depending on the blocking choices below" ;;
 esac
+TOKEN_PERMS="Account → Account Analytics → Read, plus $TOKEN_PERMS (and Workers R2 Storage → Edit if you later set blocking.r2; pnpm run validate prints the full list)"
 printf "\n"
 ask "Cloudflare API Token  (needs $TOKEN_PERMS)\n     Create at: dash.cloudflare.com/profile/api-tokens"
 read -rs API_TOKEN; printf "\n"
@@ -112,7 +115,7 @@ section "Recovery webhook (optional)"
 printf "  Lets you restore traffic via POST /restore without touching the dashboard.\n\n"
 
 ENABLE_WEBHOOK=false; RECOVERY_SECRET=""
-if yn "Enable recovery webhook?" Y; then
+if yn "Enable recovery webhook?" N; then
   ENABLE_WEBHOOK=true
   printf "\n"
   ask "Recovery secret (press Enter to generate one automatically)"

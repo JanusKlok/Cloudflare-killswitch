@@ -1,6 +1,9 @@
 name = "cloudflare-killswitch"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+# Needed only for POST /restore (enableRecoveryWebhook: true).  Otherwise set
+# false: the cron runs without it, and a public URL lets anyone spend the
+# 100,000/day Workers request quota and push the account towards a kill.
 workers_dev = true
 preview_urls = false
 
@@ -59,10 +62,12 @@ WORKER_SELF_NAME = "cloudflare-killswitch"
 # ---------------------------------------------------------------------------
 # wrangler secret put CLOUDFLARE_API_TOKEN
 #   Needs permissions depending on your config (run `pnpm run validate` for the exact list):
+#     always          -> Account.Account Analytics (Read)
 #     scope='zone'    -> Zone.WAF (Edit)
 #     scope='account' -> Account.Account WAF (Edit)
 #     blocking.workers set -> Account.Workers Scripts (Edit)
 #     blocking.pages set   -> Account.Cloudflare Pages (Edit)
+#     blocking.r2 set      -> Account.Workers R2 Storage (Edit)
 #
 # wrangler secret put RECOVERY_SECRET
 #   Any strong random string; used as the Bearer token for POST /restore
