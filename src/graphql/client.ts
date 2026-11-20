@@ -3,6 +3,11 @@ import { fetchRetry } from '../util/retry.js';
 
 const GQL_ENDPOINT = 'https://api.cloudflare.com/client/v4/graphql';
 
+// The merged usage query spans month-long windows over several datasets and
+// can take well over the 10 s default; a cron tick may run 15 min of wall time
+// and waiting on fetch costs no CPU, so a long wait is cheap.
+export const GRAPHQL_TIMEOUT_MS = 30_000;
+
 export interface GqlError {
   message: string;
   /** Root-to-node path of the failing field, e.g. ["viewer","accounts",0,"kvStorageAdaptiveGroups"]. */
@@ -22,14 +27,19 @@ export async function gqlRaw<T>(
   query: string,
   variables: Record<string, unknown>,
 ): Promise<GqlResult<T>> {
-  const res = await fetchRetry(GQL_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+  const res = await fetchRetry(
+    GQL_ENDPOINT,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+      },
+      body: JSON.stringify({ query, variables }),
     },
-    body: JSON.stringify({ query, variables }),
-  });
+    undefined,
+    GRAPHQL_TIMEOUT_MS,
+  );
 
   if (!res.ok) {
     const text = await res.text();

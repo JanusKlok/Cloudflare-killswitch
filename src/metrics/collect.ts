@@ -38,7 +38,8 @@ interface GqlData {
  *  Only blamed modules fail; the rest parse from the same response when it still
  *  carries `data`, or from a re-request without the blamed modules when it does
  *  not (Cloudflare's own example error has `data: null`).  Errors that cannot be
- *  attributed fall back to one request per module, i.e. the previous behaviour. */
+ *  attributed, and a merged request that times out, fall back to one request
+ *  per module, i.e. the previous behaviour. */
 export async function collectUsage(
   env: Env,
   cfg: AppConfig,
@@ -60,6 +61,9 @@ export async function collectUsage(
       const [query, variables] = build(env, pending);
       result = await gqlRaw<GqlData>(env, query, variables);
     } catch (err) {
+      // A timeout is latency, not refusal: one slow dataset stalls the merged
+      // query, so isolate it by asking per module instead of failing them all.
+      if (isTimeout(err)) break;
       // No GraphQL answer at all (auth, rate limit, outage): per-module requests
       // would only repeat it and burn subrequests.
       for (const p of pending) outcomes[p.index] = { error: String(err) };
@@ -117,6 +121,10 @@ export async function fetchModuleUsage(
   if (!outcome) throw new Error('no outcome');
   if ('error' in outcome) throw new Error(outcome.error);
   return outcome.samples;
+}
+
+function isTimeout(err: unknown): boolean {
+  return (err as { name?: unknown } | null)?.name === 'TimeoutError';
 }
 
 function accountOf(data: GqlData | null): AccountData | undefined {

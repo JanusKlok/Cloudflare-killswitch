@@ -97,6 +97,18 @@ describe('collectUsage', () => {
     expect(Object.values(summarize(outcomes)).every((v) => v === 'error')).toBe(true);
   });
 
+  it('falls back to one request per module when the merged request times out', async () => {
+    const timeout = () => Promise.reject(new DOMException('aborted', 'TimeoutError'));
+    vi.mocked(fetch)
+      .mockImplementationOnce(timeout)
+      .mockImplementationOnce(timeout)
+      .mockImplementation(() => ok());
+    const outcomes = await collectUsage(env, cfg, MODULES);
+    // Two merged attempts (fetchRetry), then one request per module.
+    expect(fetch).toHaveBeenCalledTimes(2 + MODULES.length);
+    expect(summarize(outcomes)).toEqual(ALL_OK);
+  });
+
   it('fails only the module whose own data is untrustworthy', async () => {
     vi.mocked(fetch).mockImplementation(() =>
       ok({
